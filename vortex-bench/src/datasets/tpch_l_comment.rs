@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::StreamExt;
 use futures::TryStreamExt;
 use glob::glob;
 use vortex::array::ArrayRef;
@@ -86,7 +87,6 @@ impl Dataset for TPCHLCommentChunked {
                         Ok(canonical.into_array())
                     }
                 })
-                .into_array_stream()?
                 .try_collect()
                 .await?;
             chunks.extend(file_chunks);

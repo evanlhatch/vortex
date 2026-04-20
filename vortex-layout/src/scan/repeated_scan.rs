@@ -6,8 +6,9 @@ use std::iter;
 use std::ops::Range;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use futures::Stream;
-use futures::future::BoxFuture;
+use futures::StreamExt;
 use itertools::Either;
 use itertools::Itertools;
 use vortex_array::ArrayRef;
@@ -27,15 +28,15 @@ use vortex_utils::parallelism::get_available_parallelism;
 
 use crate::LayoutReaderRef;
 use crate::scan::filter::FilterExpr;
+use crate::scan::limit::limit_array_stream;
 use crate::scan::splits::Splits;
-use crate::scan::tasks::TaskContext;
-use crate::scan::tasks::split_exec;
+use crate::scan::tasks::{split_exec, TaskContext, TaskFuture};
 
 /// A projected subset (by indices, range, and filter) of rows from a Vortex data source.
 ///
 /// The method of this struct enable, possibly concurrent, scanning of multiple row ranges of this
 /// data source.
-pub struct RepeatedScan<A: 'static + Send> {
+pub struct RepeatedScan {
     session: VortexSession,
     layout_reader: LayoutReaderRef,
     projection: Expression,
@@ -49,15 +50,13 @@ pub struct RepeatedScan<A: 'static + Send> {
     splits: Splits,
     /// The number of splits to make progress on concurrently **per-thread**.
     concurrency: usize,
-    /// Function to apply to each [`ArrayRef`] within the spawned split tasks.
-    map_fn: Arc<dyn Fn(ArrayRef) -> VortexResult<A> + Send + Sync>,
     /// Maximal number of rows to read (after filtering)
     limit: Option<u64>,
     /// The dtype of the projected arrays.
     dtype: DType,
 }
 
-impl RepeatedScan<ArrayRef> {
+impl RepeatedScan {
     pub fn dtype(&self) -> &DType {
         &self.dtype
     }
@@ -81,9 +80,6 @@ impl RepeatedScan<ArrayRef> {
         let stream = self.execute_stream(row_range)?;
         Ok(ArrayStreamAdapter::new(dtype, stream))
     }
-}
-
-impl<A: 'static + Send> RepeatedScan<A> {
     /// Constructor just to allow `scan_builder` to create a `RepeatedScan`.
     #[expect(
         clippy::too_many_arguments,
@@ -99,7 +95,6 @@ impl<A: 'static + Send> RepeatedScan<A> {
         selection: Selection,
         splits: Splits,
         concurrency: usize,
-        map_fn: Arc<dyn Fn(ArrayRef) -> VortexResult<A> + Send + Sync>,
         limit: Option<u64>,
         dtype: DType,
     ) -> Self {
@@ -113,16 +108,12 @@ impl<A: 'static + Send> RepeatedScan<A> {
             selection,
             splits,
             concurrency,
-            map_fn,
             limit,
             dtype,
         }
     }
 
-    pub fn execute(
-        &self,
-        row_range: Option<Range<u64>>,
-    ) -> VortexResult<Vec<BoxFuture<'static, VortexResult<Option<A>>>>> {
+    fn split_ranges(&self, row_range: Option<Range<u64>>) -> Vec<Range<u64>> {
         let selection_range: Option<Range<u64>> = match &self.selection {
             Selection::IncludeByIndex(buf) if !buf.is_empty() => {
                 Some(buf[0]..buf[buf.len() - 1] + 1)
@@ -135,14 +126,14 @@ impl<A: 'static + Send> RepeatedScan<A> {
         let row_range = intersect_ranges(self.row_range.as_ref(), row_range);
         let row_range = intersect_ranges(row_range.as_ref(), selection_range);
 
-        let ranges = match &self.splits {
+        match &self.splits {
             Splits::Natural(vec) => {
                 debug_assert!(vec.is_sorted());
                 let splits_iter = match row_range {
                     None => Either::Left(vec.iter().copied()),
                     Some(range) => {
                         if range.is_empty() {
-                            return Ok(Vec::new());
+                            return Vec::new();
                         }
                         let lo = vec.partition_point(|&x| x < range.start);
                         let hi = vec.partition_point(|&x| x < range.end);
@@ -154,33 +145,43 @@ impl<A: 'static + Send> RepeatedScan<A> {
                     }
                 };
 
-                Either::Left(splits_iter.tuple_windows().map(|(start, end)| start..end))
+                splits_iter
+                    .tuple_windows()
+                    .map(|(start, end)| start..end)
+                    .collect()
             }
-            Splits::Ranges(ranges) => Either::Right(match row_range {
-                None => Either::Left(ranges.iter().cloned()),
+            Splits::Ranges(ranges) => match row_range {
+                None => ranges.to_vec(),
                 Some(range) => {
                     if range.is_empty() {
-                        return Ok(Vec::new());
+                        return Vec::new();
                     }
-                    Either::Right(ranges.iter().filter_map(move |r| {
-                        let start = cmp::max(r.start, range.start);
-                        let end = cmp::min(r.end, range.end);
-                        (start < end).then_some(start..end)
-                    }))
+                    ranges
+                        .iter()
+                        .filter_map(move |r| {
+                            let start = cmp::max(r.start, range.start);
+                            let end = cmp::min(r.end, range.end);
+                            (start < end).then_some(start..end)
+                        })
+                        .collect()
                 }
-            }),
-        };
+            },
+        }
+    }
 
-        let mut limit = self.limit;
+    pub(crate) fn execute(
+        &self,
+        row_range: Option<Range<u64>>,
+    ) -> VortexResult<Vec<TaskFuture<Option<ArrayRef>>>> {
+        let mut limit = self.limit.filter(|_| self.filter.is_none());
         let mut tasks = Vec::new();
         let ctx = Arc::new(TaskContext {
             filter: self.filter.clone().map(|f| Arc::new(FilterExpr::new(f))),
             reader: Arc::clone(&self.layout_reader),
             projection: self.projection.clone(),
-            mapper: Arc::clone(&self.map_fn),
         });
 
-        for range in ranges {
+        for range in self.split_ranges(row_range) {
             let row_mask = self.selection.row_mask(&range);
             if row_mask.mask().all_false() {
                 continue;
@@ -195,25 +196,66 @@ impl<A: 'static + Send> RepeatedScan<A> {
         Ok(tasks)
     }
 
-    pub fn execute_stream(
+    pub(crate) fn execute_stream(
         &self,
         row_range: Option<Range<u64>>,
-    ) -> VortexResult<impl Stream<Item = VortexResult<A>> + Send + 'static + use<A>> {
-        use futures::StreamExt;
-        let num_workers = get_available_parallelism().unwrap_or(1);
-        let concurrency = self.concurrency * num_workers;
+    ) -> VortexResult<impl Stream<Item = VortexResult<ArrayRef>> + Send + 'static> {
         let handle = self.session.handle();
 
+        if self.filter.is_some() && self.limit.is_some() {
+            let ctx = Arc::new(TaskContext {
+                filter: self.filter.clone().map(|f| Arc::new(FilterExpr::new(f))),
+                reader: Arc::clone(&self.layout_reader),
+                projection: self.projection.clone(),
+            });
+            let selection = self.selection.clone();
+            let ordered = self.ordered;
+            let limit = self.limit;
+            let stream = futures::stream::iter(self.split_ranges(row_range)).filter_map(move |range| {
+                let row_mask = selection.row_mask(&range);
+                if row_mask.mask().all_false() {
+                    return async { None }.boxed();
+                }
+
+                let ctx = Arc::clone(&ctx);
+                let handle = handle.clone();
+                async move {
+                    Some(
+                        async move {
+                            let task = split_exec(ctx, row_mask, None)?;
+                            handle.spawn(task).await
+                        }
+                        .boxed(),
+                    )
+                }
+                .boxed()
+            });
+            let stream = if ordered {
+                stream.buffered(1).boxed()
+            } else {
+                stream.buffer_unordered(1).boxed()
+            };
+
+            return Ok(limit_array_stream(
+                stream.filter_map(|chunk| async move { chunk.transpose() }),
+                limit,
+            ));
+        }
+
+        let num_workers = get_available_parallelism().unwrap_or(1);
+        let concurrency = self.concurrency * num_workers;
         let stream =
             futures::stream::iter(self.execute(row_range)?).map(move |task| handle.spawn(task));
-
         let stream = if self.ordered {
             stream.buffered(concurrency).boxed()
         } else {
             stream.buffer_unordered(concurrency).boxed()
         };
 
-        Ok(stream.filter_map(|chunk| async move { chunk.transpose() }))
+        Ok(limit_array_stream(
+            stream.filter_map(|chunk| async move { chunk.transpose() }),
+            self.limit,
+        ))
     }
 }
 
