@@ -208,7 +208,7 @@ fn scan_builder(
     indices: Option<ArrayRef>,
     batch_size: Option<usize>,
     ctx: &mut ExecutionCtx,
-) -> VortexResult<ScanBuilder<ArrayRef>> {
+) -> VortexResult<ScanBuilder> {
     let mut builder = vxf
         .scan()?
         .with_some_filter(expr)
