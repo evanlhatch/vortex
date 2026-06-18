@@ -304,17 +304,17 @@ impl VarBinData {
 
 pub trait VarBinArrayExt: TypedArrayRef<VarBin> {
     fn offsets(&self) -> &ArrayRef {
-        self.as_ref().slots()[OFFSETS_SLOT]
+        self.slots()[OFFSETS_SLOT]
             .as_ref()
             .vortex_expect("VarBinArray offsets slot")
     }
 
     fn validity_child(&self) -> Option<&ArrayRef> {
-        self.as_ref().slots()[VALIDITY_SLOT].as_ref()
+        self.slots()[VALIDITY_SLOT].as_ref()
     }
 
     fn dtype_parts(&self) -> (bool, Nullability) {
-        match self.as_ref().dtype() {
+        match self.dtype() {
             DType::Utf8(nullability) => (true, *nullability),
             DType::Binary(nullability) => (false, *nullability),
             _ => unreachable!("VarBinArrayExt requires a utf8 or binary dtype"),
@@ -330,18 +330,15 @@ pub trait VarBinArrayExt: TypedArrayRef<VarBin> {
     }
 
     fn varbin_validity(&self) -> Validity {
-        child_to_validity(
-            self.as_ref().slots()[VALIDITY_SLOT].as_ref(),
-            self.nullability(),
-        )
+        child_to_validity(self.slots()[VALIDITY_SLOT].as_ref(), self.nullability())
     }
 
     #[allow(clippy::disallowed_methods)]
     fn offset_at(&self, index: usize) -> usize {
         assert!(
-            index <= self.as_ref().len(),
+            index <= self.len(),
             "Index {index} out of bounds 0..={}",
-            self.as_ref().len()
+            self.len()
         );
 
         (&self
@@ -360,7 +357,7 @@ pub trait VarBinArrayExt: TypedArrayRef<VarBin> {
 
     fn sliced_bytes(&self) -> ByteBuffer {
         let first_offset: usize = self.offset_at(0);
-        let last_offset = self.offset_at(self.as_ref().len());
+        let last_offset = self.offset_at(self.len());
         self.bytes().slice(first_offset..last_offset)
     }
 }

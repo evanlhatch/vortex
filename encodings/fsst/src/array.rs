@@ -25,6 +25,7 @@ use vortex_array::EqMode;
 use vortex_array::ExecutionCtx;
 use vortex_array::ExecutionResult;
 use vortex_array::IntoArray;
+use vortex_array::ParentRef;
 use vortex_array::TypedArrayRef;
 use vortex_array::VortexSessionExecute;
 use vortex_array::arrays::VarBin;
@@ -332,7 +333,7 @@ impl VTable for FSST {
 
     fn reduce_parent(
         array: ArrayView<'_, Self>,
-        parent: &ArrayRef,
+        parent: &ParentRef<'_>,
         child_idx: usize,
     ) -> VortexResult<Option<ArrayRef>> {
         RULES.evaluate(array, parent, child_idx)
@@ -803,7 +804,7 @@ fn uncompressed_lengths_from_slots(slots: &[Option<ArrayRef>]) -> &ArrayRef {
 
 pub trait FSSTArrayExt: TypedArrayRef<FSST> {
     fn uncompressed_lengths(&self) -> &ArrayRef {
-        uncompressed_lengths_from_slots(self.as_ref().slots())
+        uncompressed_lengths_from_slots(self.slots())
     }
 
     fn uncompressed_lengths_dtype(&self) -> &DType {
@@ -813,13 +814,13 @@ pub trait FSSTArrayExt: TypedArrayRef<FSST> {
     /// Reconstruct a [`VarBinArray`] for the compressed codes by combining the bytes
     /// from [`FSSTData`] with the offsets and validity stored in the array's slots.
     fn codes(&self) -> VarBinArray {
-        let offsets = self.as_ref().slots()[CODES_OFFSETS_SLOT]
+        let offsets = self.slots()[CODES_OFFSETS_SLOT]
             .as_ref()
             .vortex_expect("FSSTArray codes_offsets slot")
             .clone();
         let validity = child_to_validity(
-            self.as_ref().slots()[CODES_VALIDITY_SLOT].as_ref(),
-            self.as_ref().dtype().nullability(),
+            self.slots()[CODES_VALIDITY_SLOT].as_ref(),
+            self.dtype().nullability(),
         );
         let codes_bytes = self.codes_bytes_handle().clone();
         // SAFETY: components were validated at construction time.
@@ -827,7 +828,7 @@ pub trait FSSTArrayExt: TypedArrayRef<FSST> {
             VarBinArray::new_unchecked_from_handle(
                 offsets,
                 codes_bytes,
-                DType::Binary(self.as_ref().dtype().nullability()),
+                DType::Binary(self.dtype().nullability()),
                 validity,
             )
         }
@@ -835,7 +836,7 @@ pub trait FSSTArrayExt: TypedArrayRef<FSST> {
 
     /// Get the DType of the codes array.
     fn codes_dtype(&self) -> DType {
-        DType::Binary(self.as_ref().dtype().nullability())
+        DType::Binary(self.dtype().nullability())
     }
 }
 

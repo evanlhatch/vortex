@@ -175,25 +175,22 @@ pub(super) fn make_struct_slots(
 
 pub trait StructArrayExt: TypedArrayRef<Struct> {
     fn nullability(&self) -> crate::dtype::Nullability {
-        match self.as_ref().dtype() {
+        match self.dtype() {
             DType::Struct(_, nullability) => *nullability,
             _ => unreachable!("StructArrayExt requires a struct dtype"),
         }
     }
 
     fn names(&self) -> &FieldNames {
-        self.as_ref().dtype().as_struct_fields().names()
+        self.dtype().as_struct_fields().names()
     }
 
     fn struct_validity(&self) -> Validity {
-        child_to_validity(
-            self.as_ref().slots()[VALIDITY_SLOT].as_ref(),
-            self.nullability(),
-        )
+        child_to_validity(self.slots()[VALIDITY_SLOT].as_ref(), self.nullability())
     }
 
     fn iter_unmasked_fields(&self) -> impl Iterator<Item = &ArrayRef> + '_ {
-        self.as_ref().slots()[FIELDS_OFFSET..]
+        self.slots()[FIELDS_OFFSET..]
             .iter()
             .map(|s| s.as_ref().vortex_expect("StructArray field slot"))
     }
@@ -203,7 +200,7 @@ pub trait StructArrayExt: TypedArrayRef<Struct> {
     }
 
     fn unmasked_field(&self, idx: usize) -> &ArrayRef {
-        self.as_ref().slots()[FIELDS_OFFSET + idx]
+        self.slots()[FIELDS_OFFSET + idx]
             .as_ref()
             .vortex_expect("StructArray field slot")
     }
@@ -226,7 +223,7 @@ pub trait StructArrayExt: TypedArrayRef<Struct> {
     }
 
     fn struct_fields(&self) -> &StructFields {
-        self.as_ref().dtype().as_struct_fields()
+        self.dtype().as_struct_fields()
     }
 }
 impl<T: TypedArrayRef<Struct>> StructArrayExt for T {}
@@ -373,7 +370,7 @@ impl Array<Struct> {
             FieldNames::from(names.as_slice()),
             children,
             self.len(),
-            self.validity()?,
+            self.struct_validity(),
         )
     }
 
@@ -397,7 +394,7 @@ impl Array<Struct> {
             .iter()
             .map(|s| s.as_ref().vortex_expect("StructArray field slot").clone())
             .collect();
-        let validity = self.validity().vortex_expect("StructArray validity");
+        let validity = self.struct_validity();
         StructDataParts {
             struct_fields: self.struct_fields().clone(),
             fields,
@@ -454,7 +451,7 @@ impl Array<Struct> {
             .chain(once(array))
             .collect();
 
-        Self::try_new_with_dtype(children, new_fields, self.len(), self.validity()?)
+        Self::try_new_with_dtype(children, new_fields, self.len(), self.struct_validity())
     }
 
     pub fn remove_column_owned(&self, name: impl Into<FieldName>) -> Option<(Self, ArrayRef)> {

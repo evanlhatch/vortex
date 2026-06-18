@@ -205,7 +205,7 @@ impl FixedSizeListData {
 
 pub trait FixedSizeListArrayExt: TypedArrayRef<FixedSizeList> {
     fn dtype_parts(&self) -> (&DType, u32, crate::dtype::Nullability) {
-        match self.as_ref().dtype() {
+        match self.dtype() {
             DType::FixedSizeList(element_dtype, list_size, nullability) => {
                 (element_dtype.as_ref(), *list_size, *nullability)
             }
@@ -214,7 +214,7 @@ pub trait FixedSizeListArrayExt: TypedArrayRef<FixedSizeList> {
     }
 
     fn elements(&self) -> &ArrayRef {
-        self.as_ref().slots()[ELEMENTS_SLOT]
+        self.slots()[ELEMENTS_SLOT]
             .as_ref()
             .vortex_expect("FixedSizeListArray elements slot")
     }
@@ -226,16 +226,16 @@ pub trait FixedSizeListArrayExt: TypedArrayRef<FixedSizeList> {
 
     fn fixed_size_list_validity(&self) -> Validity {
         let (_, _, nullability) = self.dtype_parts();
-        child_to_validity(self.as_ref().slots()[VALIDITY_SLOT].as_ref(), nullability)
+        child_to_validity(self.slots()[VALIDITY_SLOT].as_ref(), nullability)
     }
 
     #[allow(clippy::disallowed_methods)]
     fn fixed_size_list_elements_at(&self, index: usize) -> VortexResult<ArrayRef> {
         debug_assert!(
-            index < self.as_ref().len(),
+            index < self.len(),
             "index {} out of bounds: the len is {}",
             index,
-            self.as_ref().len(),
+            self.len(),
         );
 
         let start = self.list_size() as usize * index;
