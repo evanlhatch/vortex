@@ -21,12 +21,14 @@ use vortex_array::dtype::DType;
 use vortex_array::dtype::FieldMask;
 use vortex_array::dtype::IntegerPType;
 use vortex_array::dtype::Nullability;
+use vortex_array::dtype::PType;
 use vortex_array::expr::Expression;
 use vortex_array::expr::is_root;
 use vortex_array::expr::not;
 use vortex_array::expr::root;
 use vortex_array::scalar_fn::fns::is_not_null::IsNotNull;
 use vortex_array::scalar_fn::fns::is_null::IsNull;
+use vortex_array::scalar_fn::fns::list_length::ListLength;
 use vortex_array::scalar_fn::fns::operators::Operator;
 use vortex_array::validity::Validity;
 use vortex_buffer::Buffer;
@@ -176,6 +178,46 @@ impl ListReader {
         .boxed())
     }
 
+    /// Projection for [`ExprClass::Offsets`] expressions (`list_length(root())` and expressions
+    /// composed from it): reads offsets and list validity, but never touches element values.
+    fn project_offsets(
+        &self,
+        row_range: &Range<u64>,
+        expr: &Expression,
+        mask: MaskFuture,
+    ) -> VortexResult<ArrayFuture> {
+        let offsets = self.fetch_offsets(row_range)?;
+        let reader = self.clone();
+        let row_range = row_range.clone();
+        let rewritten = rewrite_offsets_expr(expr)?;
+
+        Ok(async move {
+            let mask = mask.await?;
+            let row_count = usize::try_from(row_range.end - row_range.start)?;
+            let nullability = reader.layout.dtype().nullability();
+
+            let validity_mask = if mask.all_true() {
+                MaskFuture::new_true(row_count)
+            } else {
+                MaskFuture::ready(mask.clone())
+            };
+            let validity_fut = fetch_validity(reader.validity.as_ref(), &row_range, validity_mask)?;
+
+            let offsets = offsets.await?;
+            let lengths = list_lengths_from_offsets(offsets)?;
+            let lengths = if mask.all_true() {
+                lengths
+            } else {
+                lengths.filter(mask)?
+            };
+            let validity = validity_fut.await?;
+            let lengths = apply_lengths_validity(lengths, validity, nullability)?;
+
+            lengths.apply(&rewritten)
+        }
+        .boxed())
+    }
+
     /// Fire the offsets read for `row_range`. The offsets child has an extra entry, so reading
     /// `row_range` maps to offsets in `[row_range.start..row_range.end + 1)`.
     fn fetch_offsets(&self, row_range: &Range<u64>) -> VortexResult<ArrayFuture> {
@@ -239,15 +281,17 @@ fn create_validity(validity_array: Option<ArrayRef>, nullability: Nullability) -
 enum ExprClass {
     /// Only the list's validity is needed (`is_null` / `is_not_null` of the list itself).
     Validity,
+    /// The list offsets are needed, but not the element values (`list_length` of the list itself).
+    Offsets,
     /// The element values are needed (everything else).
     Elements,
 }
 
 /// Classify `expr` by the deepest list child it touches, where `root()` is the list.
 ///
-/// Only the exact shapes `is_null(root())` / `is_not_null(root())` (validity) are recognized. Every
-/// other access to the list, including a bare `root()`, falls through to [`ExprClass::Elements`],
-/// which is always correct.
+/// The exact shapes `is_null(root())` / `is_not_null(root())` need only validity, and
+/// `list_length(root())` needs offsets plus validity. Every other access to the list, including a
+/// bare `root()`, falls through to [`ExprClass::Elements`], which is always correct.
 fn classify(expr: &Expression) -> ExprClass {
     // `is_null(root())` / `is_not_null(root())` need only the list's own validity. Note this is
     // the list's null-ness, not the validity of some derived value, so the child must be `root()`.
@@ -256,6 +300,12 @@ fn classify(expr: &Expression) -> ExprClass {
         && is_root(expr.child(0))
     {
         return ExprClass::Validity;
+    }
+
+    // `list_length(root())` only needs adjacent offset deltas. List validity is still needed
+    // because `list_length(NULL)` is NULL.
+    if is_list_length_root(expr) {
+        return ExprClass::Offsets;
     }
 
     // A bare reference to the list needs its elements.
@@ -273,6 +323,10 @@ fn classify(expr: &Expression) -> ExprClass {
         .unwrap_or(ExprClass::Validity)
 }
 
+fn is_list_length_root(expr: &Expression) -> bool {
+    expr.is::<ListLength>() && expr.children().len() == 1 && is_root(expr.child(0))
+}
+
 /// Rewrite a validity-class expression so it can be evaluated against the list's validity bool
 /// array (`true` == valid row): `is_not_null(root())` becomes `root()` and `is_null(root())`
 /// becomes `not(root())`. All other nodes are rebuilt with rewritten children.
@@ -287,6 +341,23 @@ fn rewrite_validity_expr(expr: &Expression) -> VortexResult<Expression> {
         .children()
         .iter()
         .map(rewrite_validity_expr)
+        .collect::<VortexResult<Vec<_>>>()?;
+    expr.clone().with_children(children)
+}
+
+/// Rewrite an offsets-class expression so it can be evaluated against an array of list lengths.
+/// `list_length(root())` becomes `root()`. Other references to `root()` are left intact: for
+/// offsets-class expressions they can only be validity checks, and the lengths array carries the
+/// same validity as the original list.
+fn rewrite_offsets_expr(expr: &Expression) -> VortexResult<Expression> {
+    if is_list_length_root(expr) {
+        return Ok(root());
+    }
+
+    let children = expr
+        .children()
+        .iter()
+        .map(rewrite_offsets_expr)
         .collect::<VortexResult<Vec<_>>>()?;
     expr.clone().with_children(children)
 }
@@ -507,6 +578,7 @@ impl LayoutReader for ListReader {
         // Read as little as possible based on which list children the expression needs.
         match classify(expr) {
             ExprClass::Validity => self.project_validity(row_range, expr, mask),
+            ExprClass::Offsets => self.project_offsets(row_range, expr, mask),
             ExprClass::Elements => self.project_elements(row_range, expr, mask),
         }
     }
@@ -535,6 +607,29 @@ struct ListParts {
     elements: ArrayRef,
     offsets: ArrayRef,
     validity: Option<ArrayRef>,
+}
+
+/// Compute `offsets[i + 1] - offsets[i]` as the unmasked list length values.
+fn list_lengths_from_offsets(offsets: ArrayRef) -> VortexResult<ArrayRef> {
+    let len = offsets.len().saturating_sub(1);
+    offsets
+        .slice(1..offsets.len())?
+        .binary(offsets.slice(0..len)?, Operator::Sub)
+}
+
+fn apply_lengths_validity(
+    lengths: ArrayRef,
+    validity: Option<ArrayRef>,
+    nullability: Nullability,
+) -> VortexResult<ArrayRef> {
+    let len = lengths.len();
+    let lengths = lengths.cast(DType::Primitive(PType::U64, nullability))?;
+
+    if matches!(nullability, Nullability::Nullable) {
+        lengths.mask(create_validity(validity, nullability).to_array(len))
+    } else {
+        Ok(lengths)
+    }
 }
 
 /// Build the list array from its parts and apply the projection expression.
@@ -681,12 +776,16 @@ mod tests {
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::assert_arrays_eq;
     use vortex_array::dtype::Nullability::NonNullable;
+    use vortex_array::expr::cast;
     use vortex_array::expr::eq;
+    use vortex_array::expr::gt;
     use vortex_array::expr::is_not_null;
     use vortex_array::expr::is_null;
+    use vortex_array::expr::list_length;
     use vortex_array::expr::lit;
     use vortex_array::expr::not;
     use vortex_buffer::buffer;
+    use vortex_io::session::RuntimeSessionExt;
 
     use super::*;
     use crate::LayoutRef;
@@ -708,6 +807,17 @@ mod tests {
     #[case::not_is_null(not(is_null(root())), ExprClass::Validity)]
     // A list-independent (constant) expression falls to the cheapest class.
     #[case::constant(lit(5), ExprClass::Validity)]
+    // `list_length(root())` needs offsets and validity, but not elements.
+    #[case::list_length(list_length(root()), ExprClass::Offsets)]
+    // Compound over offsets-only operands stays offsets.
+    #[case::list_length_filter(gt(list_length(root()), lit(1u64)), ExprClass::Offsets)]
+    #[case::cast_list_length(
+        cast(
+            list_length(root()),
+            DType::Primitive(PType::I64, Nullability::Nullable),
+        ),
+        ExprClass::Offsets
+    )]
     // A bare list reference needs the elements.
     #[case::bare_root(root(), ExprClass::Elements)]
     // Any other fn over the list needs the elements.
@@ -733,13 +843,13 @@ mod tests {
     ) -> VortexResult<()> {
         let list = create_basic_list_array(nullable);
         let ctx = LayoutReaderContext::new();
-        let (segments, layout) = write_layout(&flat_list_strategy(), list).await?;
-        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+        let (segments, layout, session) = write_layout(&flat_list_strategy(), list).await?;
+        let reader = layout.new_reader("".into(), segments, &session, &ctx)?;
 
         let not_null = reader
             .projection_evaluation(&(0..3), &is_not_null(root()), MaskFuture::new_true(3))?
             .await?;
-        let mut exec_ctx = SESSION.create_execution_ctx();
+        let mut exec_ctx = session.create_execution_ctx();
         assert_arrays_eq!(not_null, BoolArray::from_iter(valid.clone()), &mut exec_ctx);
 
         let is_null_res = reader
@@ -751,6 +861,99 @@ mod tests {
             &mut exec_ctx
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn projection_list_length_reads_offsets() -> VortexResult<()> {
+        let list = create_basic_list_array(false);
+        let ctx = LayoutReaderContext::new();
+        let (segments, layout, session) = write_layout(&flat_list_strategy(), list).await?;
+        let reader = layout.new_reader("".into(), segments, &session, &ctx)?;
+
+        let result = reader
+            .projection_evaluation(&(0..3), &list_length(root()), MaskFuture::new_true(3))?
+            .await?;
+
+        let mut exec_ctx = session.create_execution_ctx();
+        assert_arrays_eq!(result, buffer![2u64, 2, 1].into_array(), &mut exec_ctx);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn projection_list_length_preserves_validity() -> VortexResult<()> {
+        let list = create_basic_list_array(true);
+        let ctx = LayoutReaderContext::new();
+        let (segments, layout, session) = write_layout(&flat_list_strategy(), list).await?;
+        let reader = layout.new_reader("".into(), segments, &session, &ctx)?;
+
+        let result = reader
+            .projection_evaluation(&(0..3), &list_length(root()), MaskFuture::new_true(3))?
+            .await?;
+
+        let expected =
+            PrimitiveArray::from_option_iter::<u64, _>([Some(2), None, Some(1)]).into_array();
+        let mut exec_ctx = session.create_execution_ctx();
+        assert_arrays_eq!(result, expected, &mut exec_ctx);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn projection_list_length_applies_sparse_mask() -> VortexResult<()> {
+        let list = create_basic_list_array(true);
+        let ctx = LayoutReaderContext::new();
+        let (segments, layout, session) = write_layout(&flat_list_strategy(), list).await?;
+        let reader = layout.new_reader("".into(), segments, &session, &ctx)?;
+
+        let mask = Mask::from_iter([false, true, true]);
+        let result = reader
+            .projection_evaluation(&(0..3), &list_length(root()), MaskFuture::ready(mask))?
+            .await?;
+
+        let expected = PrimitiveArray::from_option_iter::<u64, _>([None, Some(1)]).into_array();
+        let mut exec_ctx = session.create_execution_ctx();
+        assert_arrays_eq!(result, expected, &mut exec_ctx);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn projection_cast_list_length() -> VortexResult<()> {
+        let list = create_basic_list_array(true);
+        let ctx = LayoutReaderContext::new();
+        let (segments, layout, session) = write_layout(&flat_list_strategy(), list).await?;
+        let reader = layout.new_reader("".into(), segments, &session, &ctx)?;
+
+        let expr = cast(
+            list_length(root()),
+            DType::Primitive(PType::I64, Nullability::Nullable),
+        );
+        let result = reader
+            .projection_evaluation(&(0..3), &expr, MaskFuture::new_true(3))?
+            .await?;
+
+        let expected =
+            PrimitiveArray::from_option_iter::<i64, _>([Some(2), None, Some(1)]).into_array();
+        let mut exec_ctx = session.create_execution_ctx();
+        assert_arrays_eq!(result, expected, &mut exec_ctx);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filter_evaluation_list_length() -> VortexResult<()> {
+        let list = create_basic_list_array(true);
+        let ctx = LayoutReaderContext::new();
+        let (segments, layout, session) = write_layout(&flat_list_strategy(), list).await?;
+        let reader = layout.new_reader("".into(), segments, &session, &ctx)?;
+
+        let result = reader
+            .filter_evaluation(
+                &(0..3),
+                &gt(list_length(root()), lit(1u64)),
+                MaskFuture::new_true(3),
+            )?
+            .await?;
+
+        assert_eq!(result, Mask::from_iter([true, false, false]));
         Ok(())
     }
 
@@ -767,8 +970,8 @@ mod tests {
     ) -> VortexResult<()> {
         let list = create_basic_list_array(nullable);
         let ctx = LayoutReaderContext::new();
-        let (segments, layout) = write_layout(&flat_list_strategy(), list).await?;
-        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+        let (segments, layout, session) = write_layout(&flat_list_strategy(), list).await?;
+        let reader = layout.new_reader("".into(), segments, &session, &ctx)?;
 
         let result = reader
             .filter_evaluation(&(0..3), &expr, MaskFuture::new_true(3))?
@@ -782,8 +985,8 @@ mod tests {
     async fn filter_evaluation_intersects_with_input_mask() -> VortexResult<()> {
         let list = create_basic_list_array(true);
         let ctx = LayoutReaderContext::new();
-        let (segments, layout) = write_layout(&flat_list_strategy(), list).await?;
-        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+        let (segments, layout, session) = write_layout(&flat_list_strategy(), list).await?;
+        let reader = layout.new_reader("".into(), segments, &session, &ctx)?;
 
         let input_mask = Mask::from_iter([true, true, false]);
         let result = reader
@@ -798,8 +1001,8 @@ mod tests {
     async fn filter_evaluation_sparse_mask_maps_by_rank() -> VortexResult<()> {
         let list = create_six_list_array();
         let ctx = LayoutReaderContext::new();
-        let (segments, layout) = write_layout(&flat_list_strategy(), list).await?;
-        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+        let (segments, layout, session) = write_layout(&flat_list_strategy(), list).await?;
+        let reader = layout.new_reader("".into(), segments, &session, &ctx)?;
 
         let input_mask = Mask::from_iter([false, false, false, false, true, false]);
         let result = reader
@@ -820,15 +1023,16 @@ mod tests {
     async fn write_layout<S: LayoutStrategy>(
         strategy: &S,
         array: ArrayRef,
-    ) -> VortexResult<(Arc<dyn SegmentSource>, LayoutRef)> {
+    ) -> VortexResult<(Arc<dyn SegmentSource>, LayoutRef, VortexSession)> {
+        let session = SESSION.clone().with_tokio();
         let segments = Arc::new(TestSegments::default());
         let segments_ref: Arc<dyn SegmentSource> = Arc::<TestSegments>::clone(&segments);
         let (ptr, eof) = SequenceId::root().split();
         let stream = array.to_array_stream().sequenced(ptr);
         let layout = strategy
-            .write_stream(ArrayContext::empty(), segments, stream, eof, &SESSION)
+            .write_stream(ArrayContext::empty(), segments, stream, eof, &session)
             .await?;
-        Ok((segments_ref, layout))
+        Ok((segments_ref, layout, session))
     }
 
     fn materialize_u32_array(array: ArrayRef) -> Vec<u32> {
@@ -1046,9 +1250,9 @@ mod tests {
     async fn fetch_offsets_includes_extra_endpoint() -> VortexResult<()> {
         let list = create_basic_list_array(false);
 
-        let (segments, layout) = write_layout(&flat_list_strategy(), list).await?;
+        let (segments, layout, session) = write_layout(&flat_list_strategy(), list).await?;
         let ctx = LayoutReaderContext::new();
-        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+        let reader = layout.new_reader("".into(), segments, &session, &ctx)?;
         let reader = reader
             .as_any()
             .downcast_ref::<ListReader>()
@@ -1076,8 +1280,8 @@ mod tests {
         let ctx = LayoutReaderContext::new();
 
         let len = usize::try_from(row_range.end - row_range.start)?;
-        let (segments, layout) = write_layout(&flat_list_strategy(), list.clone()).await?;
-        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+        let (segments, layout, session) = write_layout(&flat_list_strategy(), list.clone()).await?;
+        let reader = layout.new_reader("".into(), segments, &session, &ctx)?;
 
         let result = reader
             .projection_evaluation(&row_range, &root(), MaskFuture::new_true(len))?
@@ -1085,7 +1289,7 @@ mod tests {
 
         let expected =
             list.slice(usize::try_from(row_range.start)?..usize::try_from(row_range.end)?)?;
-        let mut exec_ctx = SESSION.create_execution_ctx();
+        let mut exec_ctx = session.create_execution_ctx();
         assert_arrays_eq!(result, expected, &mut exec_ctx);
         Ok(())
     }
@@ -1094,8 +1298,8 @@ mod tests {
     async fn projection_evaluation_applies_mask() -> VortexResult<()> {
         let list = create_basic_list_array(false);
         let ctx = LayoutReaderContext::new();
-        let (segments, layout) = write_layout(&flat_list_strategy(), list.clone()).await?;
-        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+        let (segments, layout, session) = write_layout(&flat_list_strategy(), list.clone()).await?;
+        let reader = layout.new_reader("".into(), segments, &session, &ctx)?;
 
         let mask = Mask::from_iter([true, false, true]);
         let result = reader
@@ -1103,7 +1307,7 @@ mod tests {
             .await?;
 
         let expected = list.filter(mask)?;
-        let mut exec_ctx = SESSION.create_execution_ctx();
+        let mut exec_ctx = session.create_execution_ctx();
         assert_arrays_eq!(result, expected, &mut exec_ctx);
         Ok(())
     }
@@ -1144,15 +1348,15 @@ mod tests {
     ) -> VortexResult<()> {
         let list = create_wider_list_array(nullable);
         let ctx = LayoutReaderContext::new();
-        let (segments, layout) = write_layout(&flat_list_strategy(), list.clone()).await?;
-        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+        let (segments, layout, session) = write_layout(&flat_list_strategy(), list.clone()).await?;
+        let reader = layout.new_reader("".into(), segments, &session, &ctx)?;
 
         let result = reader
             .projection_evaluation(&(0..5), &root(), MaskFuture::ready(mask.clone()))?
             .await?;
 
         let expected = list.filter(mask)?;
-        let mut exec_ctx = SESSION.create_execution_ctx();
+        let mut exec_ctx = session.create_execution_ctx();
         assert_arrays_eq!(result, expected, &mut exec_ctx);
         Ok(())
     }
