@@ -11,6 +11,7 @@ use vortex_session::registry::Registry;
 use crate::LayoutEncodingRef;
 use crate::layouts::chunked::ChunkedLayoutEncoding;
 use crate::layouts::dict::DictLayoutEncoding;
+use crate::layouts::fixed_size_list::FixedSizeListLayoutEncoding;
 use crate::layouts::flat::FlatLayoutEncoding;
 use crate::layouts::list::ListLayoutEncoding;
 use crate::layouts::struct_::StructLayoutEncoding;
@@ -50,6 +51,10 @@ impl Default for LayoutSession {
 
         // Register the built-in layout encodings.
         layouts.register(ChunkedLayoutEncoding.id(), ChunkedLayoutEncoding.as_ref());
+        layouts.register(
+            FixedSizeListLayoutEncoding.id(),
+            FixedSizeListLayoutEncoding.as_ref(),
+        );
         layouts.register(FlatLayoutEncoding.id(), FlatLayoutEncoding.as_ref());
         layouts.register(StructLayoutEncoding.id(), StructLayoutEncoding.as_ref());
         layouts.register(ZonedLayoutEncoding.id(), ZonedLayoutEncoding.as_ref());
