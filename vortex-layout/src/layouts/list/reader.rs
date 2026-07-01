@@ -23,12 +23,7 @@ use vortex_array::dtype::IntegerPType;
 use vortex_array::dtype::Nullability;
 use vortex_array::dtype::PType;
 use vortex_array::expr::Expression;
-use vortex_array::expr::is_root;
-use vortex_array::expr::not;
 use vortex_array::expr::root;
-use vortex_array::scalar_fn::fns::is_not_null::IsNotNull;
-use vortex_array::scalar_fn::fns::is_null::IsNull;
-use vortex_array::scalar_fn::fns::list_length::ListLength;
 use vortex_array::scalar_fn::fns::operators::Operator;
 use vortex_array::validity::Validity;
 use vortex_buffer::Buffer;
@@ -45,6 +40,10 @@ use crate::LayoutReaderRef;
 use crate::RowSplits;
 use crate::SplitRange;
 use crate::layouts::list::ListLayout;
+use crate::layouts::list::expr::ExprClass;
+use crate::layouts::list::expr::classify;
+use crate::layouts::list::expr::rewrite_offsets_expr;
+use crate::layouts::list::expr::rewrite_validity_expr;
 use crate::segments::SegmentSource;
 
 type OptionalArrayFuture = BoxFuture<'static, VortexResult<Option<ArrayRef>>>;
@@ -270,96 +269,6 @@ fn create_validity(validity_array: Option<ArrayRef>, nullability: Nullability) -
             Nullability::NonNullable => Validity::NonNullable,
         },
     }
-}
-
-/// The deepest list child an expression needs, cheapest first.
-///
-/// Drives "fetch as little as possible": a projection/filter that only inspects the list's
-/// null-ness needs the validity child; everything else needs the element values. The ordering
-/// `Validity < Elements` lets us take the max over the operands of a compound expression.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum ExprClass {
-    /// Only the list's validity is needed (`is_null` / `is_not_null` of the list itself).
-    Validity,
-    /// The list offsets are needed, but not the element values (`list_length` of the list itself).
-    Offsets,
-    /// The element values are needed (everything else).
-    Elements,
-}
-
-/// Classify `expr` by the deepest list child it touches, where `root()` is the list.
-///
-/// The exact shapes `is_null(root())` / `is_not_null(root())` need only validity, and
-/// `list_length(root())` needs offsets plus validity. Every other access to the list, including a
-/// bare `root()`, falls through to [`ExprClass::Elements`], which is always correct.
-fn classify(expr: &Expression) -> ExprClass {
-    // `is_null(root())` / `is_not_null(root())` need only the list's own validity. Note this is
-    // the list's null-ness, not the validity of some derived value, so the child must be `root()`.
-    if (expr.is::<IsNull>() || expr.is::<IsNotNull>())
-        && expr.children().len() == 1
-        && is_root(expr.child(0))
-    {
-        return ExprClass::Validity;
-    }
-
-    // `list_length(root())` only needs adjacent offset deltas. List validity is still needed
-    // because `list_length(NULL)` is NULL.
-    if is_list_length_root(expr) {
-        return ExprClass::Offsets;
-    }
-
-    // A bare reference to the list needs its elements.
-    if is_root(expr) {
-        return ExprClass::Elements;
-    }
-
-    // Otherwise the requirement is the max over the operands. Operands that never touch the list
-    // (e.g. literals) contribute nothing, so an expression that never references `root()` is
-    // treated as the cheapest class.
-    expr.children()
-        .iter()
-        .map(classify)
-        .max()
-        .unwrap_or(ExprClass::Validity)
-}
-
-fn is_list_length_root(expr: &Expression) -> bool {
-    expr.is::<ListLength>() && expr.children().len() == 1 && is_root(expr.child(0))
-}
-
-/// Rewrite a validity-class expression so it can be evaluated against the list's validity bool
-/// array (`true` == valid row): `is_not_null(root())` becomes `root()` and `is_null(root())`
-/// becomes `not(root())`. All other nodes are rebuilt with rewritten children.
-fn rewrite_validity_expr(expr: &Expression) -> VortexResult<Expression> {
-    if expr.is::<IsNotNull>() && expr.children().len() == 1 && is_root(expr.child(0)) {
-        return Ok(root());
-    }
-    if expr.is::<IsNull>() && expr.children().len() == 1 && is_root(expr.child(0)) {
-        return Ok(not(root()));
-    }
-    let children = expr
-        .children()
-        .iter()
-        .map(rewrite_validity_expr)
-        .collect::<VortexResult<Vec<_>>>()?;
-    expr.clone().with_children(children)
-}
-
-/// Rewrite an offsets-class expression so it can be evaluated against an array of list lengths.
-/// `list_length(root())` becomes `root()`. Other references to `root()` are left intact: for
-/// offsets-class expressions they can only be validity checks, and the lengths array carries the
-/// same validity as the original list.
-fn rewrite_offsets_expr(expr: &Expression) -> VortexResult<Expression> {
-    if is_list_length_root(expr) {
-        return Ok(root());
-    }
-
-    let children = expr
-        .children()
-        .iter()
-        .map(rewrite_offsets_expr)
-        .collect::<VortexResult<Vec<_>>>()?;
-    expr.clone().with_children(children)
 }
 
 /// Plan for fetching only the elements needed to materialize the kept list rows under a sparse
@@ -777,13 +686,11 @@ mod tests {
     use vortex_array::assert_arrays_eq;
     use vortex_array::dtype::Nullability::NonNullable;
     use vortex_array::expr::cast;
-    use vortex_array::expr::eq;
     use vortex_array::expr::gt;
     use vortex_array::expr::is_not_null;
     use vortex_array::expr::is_null;
     use vortex_array::expr::list_length;
     use vortex_array::expr::lit;
-    use vortex_array::expr::not;
     use vortex_buffer::buffer;
     use vortex_io::session::RuntimeSessionExt;
 
@@ -796,39 +703,6 @@ mod tests {
     use crate::sequence::SequenceId;
     use crate::sequence::SequentialArrayStreamExt;
     use crate::test::SESSION;
-
-    /// `classify` keys off the deepest list child an expression touches; `Elements` is the
-    /// always-correct default for anything not specifically recognized.
-    #[rstest]
-    // `is_null` / `is_not_null` of the list itself need only validity.
-    #[case::is_null(is_null(root()), ExprClass::Validity)]
-    #[case::is_not_null(is_not_null(root()), ExprClass::Validity)]
-    // Compound over validity-only operands stays validity.
-    #[case::not_is_null(not(is_null(root())), ExprClass::Validity)]
-    // A list-independent (constant) expression falls to the cheapest class.
-    #[case::constant(lit(5), ExprClass::Validity)]
-    // `list_length(root())` needs offsets and validity, but not elements.
-    #[case::list_length(list_length(root()), ExprClass::Offsets)]
-    // Compound over offsets-only operands stays offsets.
-    #[case::list_length_filter(gt(list_length(root()), lit(1u64)), ExprClass::Offsets)]
-    #[case::cast_list_length(
-        cast(
-            list_length(root()),
-            DType::Primitive(PType::I64, Nullability::Nullable),
-        ),
-        ExprClass::Offsets
-    )]
-    // A bare list reference needs the elements.
-    #[case::bare_root(root(), ExprClass::Elements)]
-    // Any other fn over the list needs the elements.
-    #[case::not_root(not(root()), ExprClass::Elements)]
-    // `is_null` only short-circuits to validity when its argument is the list itself.
-    #[case::is_null_of_derived(is_null(not(root())), ExprClass::Elements)]
-    // Max over operands: validity + elements => elements.
-    #[case::validity_and_elements(eq(is_null(root()), root()), ExprClass::Elements)]
-    fn classify_expr_class(#[case] expr: Expression, #[case] expected: ExprClass) {
-        assert_eq!(classify(&expr), expected);
-    }
 
     /// Validity-class projections (`is_null` / `is_not_null` of the list) round-trip through the
     /// validity-only read path, for both nullable and non-nullable lists.
