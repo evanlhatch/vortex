@@ -566,7 +566,7 @@ struct ElementsProjection {
 }
 
 impl ElementsProjection {
-    /// Path A1: whole-chunk read with an all-true mask. The elements bound is the whole elements
+    /// Whole-chunk read with an all-true mask. The elements bound is the whole elements
     /// buffer (`0..elements_row_count`) and `offsets[0] == 0` within a chunk, so we don't need to
     /// read offsets to know the bound and don't need to rebase. Fires elements + validity in
     /// parallel with the already-in-flight offsets — a single `try_join!` over all three children.
@@ -601,7 +601,7 @@ impl ElementsProjection {
         )
     }
 
-    /// Path A2: partial range with an all-true mask. The elements bound is
+    /// Partial range with an all-true mask. The elements bound is
     /// `offsets[a]..offsets[b]`, so we await offsets before firing the elements read and rebase the
     /// offsets to start at zero.
     async fn project_full_range(self) -> VortexResult<ArrayRef> {
@@ -639,7 +639,7 @@ impl ElementsProjection {
         )
     }
 
-    /// Path B: sparse mask. Bound the elements fetch to the tightest range covering the kept rows
+    /// Bound the elements fetch to the tightest range covering the kept rows
     /// and pass an element-level mask so the elements child only materializes kept-row positions;
     /// validity is fetched for the kept rows by pushing the caller mask down directly.
     async fn project_sparse(self, mask: Mask) -> VortexResult<ArrayRef> {
