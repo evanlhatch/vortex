@@ -20,6 +20,7 @@ use vortex_error::vortex_ensure_eq;
 use vortex_error::vortex_err;
 use vortex_error::vortex_panic;
 use vortex_session::VortexSession;
+use vortex_session::registry::CachedId;
 
 use crate::LayoutBuildContext;
 use crate::LayoutChildType;
@@ -52,7 +53,8 @@ impl VTable for List {
     type Metadata = ProstMetadata<ListLayoutMetadata>;
 
     fn id(_encoding: &Self::Encoding) -> LayoutId {
-        LayoutId::new("vortex.list")
+        static ID: CachedId = CachedId::new("vortex.list");
+        *ID
     }
 
     fn encoding(_layout: &Self::Layout) -> LayoutEncodingRef {

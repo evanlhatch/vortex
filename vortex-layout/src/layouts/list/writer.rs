@@ -248,6 +248,7 @@ mod tests {
     use vortex_array::dtype::PType;
     use vortex_array::validity::Validity;
     use vortex_buffer::buffer;
+    use vortex_io::session::RuntimeSession;
 
     use super::*;
     use crate::layouts::chunked::writer::ChunkedLayoutStrategy;
@@ -255,18 +256,26 @@ mod tests {
     use crate::layouts::table::TableStrategy;
     use crate::segments::TestSegments;
     use crate::sequence::SequentialArrayStreamExt;
-    use crate::test::SESSION;
+    use crate::session::LayoutSession;
+
+    fn layout_test_session() -> VortexSession {
+        vortex_array::array_session()
+            .with::<LayoutSession>()
+            .with::<RuntimeSession>()
+            .with_tokio()
+    }
 
     fn flat_list_strategy() -> ListLayoutStrategy {
         ListLayoutStrategy::default()
     }
 
     async fn write<S: LayoutStrategy>(strategy: &S, array: ArrayRef) -> VortexResult<LayoutRef> {
+        let session = layout_test_session();
         let segments = Arc::new(TestSegments::default());
         let (ptr, eof) = SequenceId::root().split();
         let stream = array.to_array_stream().sequenced(ptr);
         strategy
-            .write_stream(ArrayContext::empty(), segments, stream, eof, &SESSION)
+            .write_stream(ArrayContext::empty(), segments, stream, eof, &session)
             .await
     }
 
@@ -339,9 +348,10 @@ mod tests {
         let (_, eof) = SequenceId::root().split();
         let empty = stream::empty::<VortexResult<(SequenceId, ArrayRef)>>().boxed();
         let stream = SequentialStreamAdapter::new(i32_list_dtype(false), empty).sendable();
+        let session = layout_test_session();
 
         let res = flat_list_strategy()
-            .write_stream(ArrayContext::empty(), segments, stream, eof, &SESSION)
+            .write_stream(ArrayContext::empty(), segments, stream, eof, &session)
             .await;
         assert!(res.is_err())
     }
