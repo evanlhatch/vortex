@@ -692,6 +692,7 @@ mod tests {
     use vortex_array::expr::list_length;
     use vortex_array::expr::lit;
     use vortex_buffer::buffer;
+    use vortex_io::session::RuntimeSession;
     use vortex_io::session::RuntimeSessionExt;
 
     use super::*;
@@ -702,6 +703,7 @@ mod tests {
     use crate::segments::TestSegments;
     use crate::sequence::SequenceId;
     use crate::sequence::SequentialArrayStreamExt;
+    use crate::session::LayoutSession;
     use crate::test::SESSION;
 
     /// Validity-class projections (`is_null` / `is_not_null` of the list) round-trip through the
@@ -894,11 +896,17 @@ mod tests {
         ListLayoutStrategy::default()
     }
 
+    fn layout_test_session() -> VortexSession {
+        vortex_array::array_session()
+            .with::<LayoutSession>()
+            .with::<RuntimeSession>()
+    }
+
     async fn write_layout<S: LayoutStrategy>(
         strategy: &S,
         array: ArrayRef,
     ) -> VortexResult<(Arc<dyn SegmentSource>, LayoutRef, VortexSession)> {
-        let session = SESSION.clone().with_tokio();
+        let session = layout_test_session().with_tokio();
         let segments = Arc::new(TestSegments::default());
         let segments_ref: Arc<dyn SegmentSource> = Arc::<TestSegments>::clone(&segments);
         let (ptr, eof) = SequenceId::root().split();
