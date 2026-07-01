@@ -10,56 +10,50 @@ use vortex_array::scalar_fn::fns::is_null::IsNull;
 use vortex_array::scalar_fn::fns::list_length::ListLength;
 use vortex_error::VortexResult;
 
-/// The deepest list child an expression needs, cheapest first.
+/// The deepest list child an expression needs, cheapest first, where I/O cost order is defined as
+/// `Validity < OffsetsAndValidity < All`.
 ///
-/// Drives "fetch as little as possible": a projection/filter that only inspects the list's
-/// null-ness needs the validity child; `list_length(root())` needs offsets plus validity; and
-/// everything else needs the element values. The ordering `Validity < Offsets < Elements` lets us
-/// take the max over the operands of a compound expression.
+/// For example:
+///     - `is_null(root())` only needs the validity child.
+///     - `list_length(root())` only needs the offsets and validity children.
+///     - `root()` needs elements, offsets, and validity children.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum ExprClass {
-    /// Only the list's validity is needed (`is_null` / `is_not_null` of the list itself).
+pub(super) enum ListChildrenNeeded {
+    /// Only the validity child is needed (`is_null` / `is_not_null`).
     Validity,
-    /// The list offsets are needed, but not the element values (`list_length` of the list itself).
-    Offsets,
-    /// The element values are needed (everything else).
-    Elements,
+    /// The offsets and validity children are needed, but not the element values (`list_length`).
+    OffsetsAndValidity,
+    /// All children are needed.
+    All,
 }
 
-/// Classify `expr` by the deepest list child it touches, where `root()` is the list.
-///
-/// The exact shapes `is_null(root())` / `is_not_null(root())` need only validity, and
-/// `list_length(root())` needs offsets plus validity. Every other access to the list, including a
-/// bare `root()`, falls through to [`ExprClass::Elements`], which is always correct.
-pub(super) fn classify(expr: &Expression) -> ExprClass {
-    // `is_null(root())` / `is_not_null(root())` need only the list's own validity. Note this is
-    // the list's null-ness, not the validity of some derived value, so the child must be `root()`.
-    if (expr.is::<IsNull>() || expr.is::<IsNotNull>())
-        && expr.children().len() == 1
-        && is_root(expr.child(0))
-    {
-        return ExprClass::Validity;
+/// The minimal list children needed to evaluate `expr`, where `root()` is a field with list dtype.
+pub(super) fn get_necessary_list_children(expr: &Expression) -> ListChildrenNeeded {
+    if is_null_root(expr) {
+        return ListChildrenNeeded::Validity;
     }
 
-    // `list_length(root())` only needs adjacent offset deltas. List validity is still needed
-    // because `list_length(NULL)` is NULL.
     if is_list_length_root(expr) {
-        return ExprClass::Offsets;
+        return ListChildrenNeeded::OffsetsAndValidity;
     }
 
-    // A bare reference to the list needs its elements.
     if is_root(expr) {
-        return ExprClass::Elements;
+        return ListChildrenNeeded::All;
     }
 
-    // Otherwise the requirement is the max over the operands. Operands that never touch the list
-    // (e.g. literals) contribute nothing, so an expression that never references `root()` is
-    // treated as the cheapest class.
+    // Otherwise the requirement is the max over the operands. Childless expressions that never
+    // touch the list, such as literals, fall back to the cheapest usable child.
     expr.children()
         .iter()
-        .map(classify)
+        .map(get_necessary_list_children)
         .max()
-        .unwrap_or(ExprClass::Validity)
+        .unwrap_or(ListChildrenNeeded::Validity)
+}
+
+fn is_null_root(expr: &Expression) -> bool {
+    (expr.is::<IsNull>() || expr.is::<IsNotNull>())
+        && expr.children().len() == 1
+        && is_root(expr.child(0))
 }
 
 fn is_list_length_root(expr: &Expression) -> bool {
@@ -119,36 +113,39 @@ mod tests {
 
     use super::*;
 
-    /// `classify` keys off the deepest list child an expression touches; `Elements` is the
-    /// always-correct default for anything not specifically recognized.
+    /// `get_necessary_list_children` keys off the deepest list child an expression touches; `All`
+    /// is the always-correct default for anything not specifically recognized.
     #[rstest]
     // `is_null` / `is_not_null` of the list itself need only validity.
-    #[case::is_null(is_null(root()), ExprClass::Validity)]
-    #[case::is_not_null(is_not_null(root()), ExprClass::Validity)]
+    #[case::is_null(is_null(root()), ListChildrenNeeded::Validity)]
+    #[case::is_not_null(is_not_null(root()), ListChildrenNeeded::Validity)]
     // Compound over validity-only operands stays validity.
-    #[case::not_is_null(not(is_null(root())), ExprClass::Validity)]
-    // A list-independent (constant) expression falls to the cheapest class.
-    #[case::constant(lit(5), ExprClass::Validity)]
+    #[case::not_is_null(not(is_null(root())), ListChildrenNeeded::Validity)]
+    // A list-independent (constant) expression falls to the cheapest usable child.
+    #[case::constant(lit(5), ListChildrenNeeded::Validity)]
     // `list_length(root())` needs offsets and validity, but not elements.
-    #[case::list_length(list_length(root()), ExprClass::Offsets)]
+    #[case::list_length(list_length(root()), ListChildrenNeeded::OffsetsAndValidity)]
     // Compound over offsets-only operands stays offsets.
-    #[case::list_length_filter(gt(list_length(root()), lit(1u64)), ExprClass::Offsets)]
+    #[case::list_length_filter(
+        gt(list_length(root()), lit(1u64)),
+        ListChildrenNeeded::OffsetsAndValidity
+    )]
     #[case::cast_list_length(
         cast(
             list_length(root()),
             DType::Primitive(PType::I64, Nullability::Nullable),
         ),
-        ExprClass::Offsets
+        ListChildrenNeeded::OffsetsAndValidity
     )]
     // A bare list reference needs the elements.
-    #[case::bare_root(root(), ExprClass::Elements)]
+    #[case::bare_root(root(), ListChildrenNeeded::All)]
     // Any other fn over the list needs the elements.
-    #[case::not_root(not(root()), ExprClass::Elements)]
+    #[case::not_root(not(root()), ListChildrenNeeded::All)]
     // `is_null` only short-circuits to validity when its argument is the list itself.
-    #[case::is_null_of_derived(is_null(not(root())), ExprClass::Elements)]
+    #[case::is_null_of_derived(is_null(not(root())), ListChildrenNeeded::All)]
     // Max over operands: validity + elements => elements.
-    #[case::validity_and_elements(eq(is_null(root()), root()), ExprClass::Elements)]
-    fn classify_expr_class(#[case] expr: Expression, #[case] expected: ExprClass) {
-        assert_eq!(classify(&expr), expected);
+    #[case::validity_and_elements(eq(is_null(root()), root()), ListChildrenNeeded::All)]
+    fn classify_expr_class(#[case] expr: Expression, #[case] expected: ListChildrenNeeded) {
+        assert_eq!(get_necessary_list_children(&expr), expected);
     }
 }

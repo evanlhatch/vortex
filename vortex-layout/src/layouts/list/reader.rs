@@ -40,8 +40,8 @@ use crate::LayoutReaderRef;
 use crate::RowSplits;
 use crate::SplitRange;
 use crate::layouts::list::ListLayout;
-use crate::layouts::list::expr::ExprClass;
-use crate::layouts::list::expr::classify;
+use crate::layouts::list::expr::ListChildrenNeeded;
+use crate::layouts::list::expr::get_necessary_list_children;
 use crate::layouts::list::expr::rewrite_offsets_expr;
 use crate::layouts::list::expr::rewrite_validity_expr;
 use crate::segments::SegmentSource;
@@ -105,9 +105,9 @@ impl ListReader {
         })
     }
 
-    /// Projection for [`ExprClass::Validity`] expressions (`is_null` / `is_not_null` of the list):
-    /// reads only the validity child — synthesizing all-valid for a non-nullable list — and never
-    /// touches the offsets or elements.
+    /// Projection for [`ListChildrenNeeded::Validity`] expressions (`is_null` / `is_not_null` of
+    /// the list): reads only the validity child, synthesizing all-valid for a non-nullable list,
+    /// and never touches the offsets or elements.
     fn project_validity(
         &self,
         row_range: &Range<u64>,
@@ -143,8 +143,8 @@ impl ListReader {
         .boxed())
     }
 
-    /// Projection for [`ExprClass::Elements`] expressions (everything else): materializes the list
-    /// (offsets + elements + validity) and applies the expression.
+    /// Projection for [`ListChildrenNeeded::All`] expressions: materializes the list (offsets +
+    /// elements + validity) and applies the expression.
     fn project_elements(
         &self,
         row_range: &Range<u64>,
@@ -177,8 +177,9 @@ impl ListReader {
         .boxed())
     }
 
-    /// Projection for [`ExprClass::Offsets`] expressions (`list_length(root())` and expressions
-    /// composed from it): reads offsets and list validity, but never touches element values.
+    /// Projection for [`ListChildrenNeeded::OffsetsAndValidity`] expressions (`list_length(root())`
+    /// and expressions composed from it): reads offsets and list validity, but never touches
+    /// element values.
     fn project_offsets(
         &self,
         row_range: &Range<u64>,
@@ -485,10 +486,10 @@ impl LayoutReader for ListReader {
         mask: MaskFuture,
     ) -> VortexResult<ArrayFuture> {
         // Read as little as possible based on which list children the expression needs.
-        match classify(expr) {
-            ExprClass::Validity => self.project_validity(row_range, expr, mask),
-            ExprClass::Offsets => self.project_offsets(row_range, expr, mask),
-            ExprClass::Elements => self.project_elements(row_range, expr, mask),
+        match get_necessary_list_children(expr) {
+            ListChildrenNeeded::Validity => self.project_validity(row_range, expr, mask),
+            ListChildrenNeeded::OffsetsAndValidity => self.project_offsets(row_range, expr, mask),
+            ListChildrenNeeded::All => self.project_elements(row_range, expr, mask),
         }
     }
 }
