@@ -15,6 +15,7 @@ import dev.vortex.api.VortexWriter;
 import dev.vortex.jni.NativeLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -101,13 +102,19 @@ public class VortexJniReadBenchmark {
     Session session;
     DataSource dataSource;
     Path file;
+    // When VORTEX_JNI_BENCH_FILE is set, the table is written to (and kept at) that path instead of a deleted-on-exit
+    // temp file, so the native-Rust "floor" lane can read the byte-identical file this benchmark reads. Default
+    // behavior (unset) is unchanged: a temp file removed in teardown.
+    boolean keepFile;
 
     @Setup(Level.Trial)
     public void setup() throws Exception {
         NativeLoader.loadJni();
         allocator = new RootAllocator(Long.MAX_VALUE);
         session = Session.create();
-        file = Files.createTempFile("vortex-jni-bench-", ".vortex");
+        String keepPath = System.getenv("VORTEX_JNI_BENCH_FILE");
+        keepFile = keepPath != null && !keepPath.isEmpty();
+        file = keepFile ? Paths.get(keepPath) : Files.createTempFile("vortex-jni-bench-", ".vortex");
         Files.deleteIfExists(file);
         String uri = file.toAbsolutePath().toUri().toString();
         writeTable(session, allocator, uri, WRITE_CHUNK);
@@ -119,9 +126,10 @@ public class VortexJniReadBenchmark {
     public void teardown() throws Exception {
         // Intentionally does not close the allocator: DataSource/Scan native resources are released by VortexCleaner
         // at GC time, which races an explicit allocator.close() and trips leak detection. The JMH fork exits after the
-        // trial and reclaims everything; we only remove the temp file.
+        // trial and reclaims everything; we only remove the temp file. When keepFile is set the file is retained for
+        // the native floor lane.
         dataSource = null;
-        if (file != null) {
+        if (file != null && !keepFile) {
             Files.deleteIfExists(file);
         }
     }
