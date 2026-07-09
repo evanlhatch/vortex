@@ -50,10 +50,10 @@ use vortex_layout::layouts::compressed::CompressingStrategy;
 use vortex_layout::layouts::compressed::CompressorPlugin;
 use vortex_layout::layouts::dict::writer::DictStrategy;
 use vortex_layout::layouts::flat::writer::FlatLayoutStrategy;
-use vortex_layout::layouts::list::writer::ListLayoutStrategy;
 use vortex_layout::layouts::repartition::RepartitionStrategy;
 use vortex_layout::layouts::repartition::RepartitionWriterOptions;
 use vortex_layout::layouts::table::TableStrategy;
+use vortex_layout::layouts::table::use_experimental_list_layout;
 use vortex_layout::layouts::zoned::writer::ZonedLayoutOptions;
 use vortex_layout::layouts::zoned::writer::ZonedStrategy;
 #[cfg(feature = "unstable_encodings")]
@@ -158,6 +158,10 @@ pub struct WriteStrategyBuilder {
     allow_encodings: Option<HashSet<ArrayId>>,
     flat_strategy: Option<Arc<dyn LayoutStrategy>>,
     probe_compressor: Option<Arc<dyn CompressorPlugin>>,
+    /// Force list-column decomposition on, overriding the
+    /// [`use_experimental_list_layout`](vortex_layout::layouts::table::use_experimental_list_layout)
+    /// env-var default of off.
+    list_layout: bool,
 }
 
 impl Default for WriteStrategyBuilder {
@@ -171,6 +175,7 @@ impl Default for WriteStrategyBuilder {
             allow_encodings: Some(ALLOWED_ENCODINGS.clone()),
             flat_strategy: None,
             probe_compressor: None,
+            list_layout: false,
         }
     }
 }
@@ -182,6 +187,14 @@ impl WriteStrategyBuilder {
     /// random-access locality.
     pub fn with_row_block_size(mut self, row_block_size: usize) -> Self {
         self.row_block_size = row_block_size;
+        self
+    }
+
+    /// Enable list-column decomposition, overriding the env-var default of off. When enabled, list
+    /// columns are written as a `ListLayout` (independently compressed/chunked
+    /// elements/offsets/validity) rather than as flat arrays.
+    pub fn with_list_layout(mut self) -> Self {
+        self.list_layout = true;
         self
     }
 
@@ -251,20 +264,10 @@ impl WriteStrategyBuilder {
             Arc::new(FlatLayoutStrategy::default())
         };
 
-        // 7. for each chunk create a layout. List-typed chunks route through
-        // `ListLayoutStrategy` (separately-addressable elements/offsets/validity sub-layouts;
-        // non-list chunks fall through its built-in fallback to `flat`).
-        let leaf: Arc<dyn LayoutStrategy> = Arc::new(
-            // Thread the configured `flat` (which carries `allow_encodings` / any custom flat
-            // override) through every child.
-            ListLayoutStrategy::default()
-                .with_elements(Arc::clone(&flat))
-                .with_offsets(Arc::clone(&flat))
-                .with_validity(Arc::clone(&flat))
-                .with_fallback(Arc::clone(&flat)),
-        );
-
-        let chunked = ChunkedLayoutStrategy::new(leaf);
+        // 7. for each chunk create a flat layout. List columns are decomposed above this point by
+        // the `TableStrategy` dispatcher (into independently-compressed elements/offsets/validity
+        // sub-columns), so the per-chunk leaf only ever sees flat, non-list chunks.
+        let chunked = ChunkedLayoutStrategy::new(Arc::clone(&flat));
         // 6. buffer chunks so they end up with closer segment ids physically
         let buffered = BufferedStrategy::new(chunked, 2 * ONE_MEG); // 2MB
 
@@ -348,8 +351,14 @@ impl WriteStrategyBuilder {
         let validity_strategy = CollectStrategy::new(compress_then_flat);
 
         // Take any field overrides from the builder and apply them to the final strategy.
-        let table_strategy = TableStrategy::new(Arc::new(validity_strategy), Arc::new(repartition))
-            .with_field_writers(self.field_writers);
+        let mut table_strategy =
+            TableStrategy::new(Arc::new(validity_strategy), Arc::new(repartition))
+                .with_field_writers(self.field_writers);
+        // List decomposition is experimental: enabled by an explicit builder opt-in or the
+        // `VORTEX_EXPERIMENTAL_LIST_LAYOUT` env var; off otherwise.
+        if self.list_layout || use_experimental_list_layout() {
+            table_strategy = table_strategy.with_list_layout();
+        }
 
         Arc::new(table_strategy)
     }

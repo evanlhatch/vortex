@@ -4,14 +4,17 @@
 //! A configurable writer strategy for tabular data.
 //!
 //! [`TableStrategy`] is a *dispatcher*: it inspects the dtype of the stream it is handed and
-//! routes struct columns to [`StructStrategy`] and everything else to the configured leaf
-//! strategy. Because it hands *itself* (suitably descended) to [`StructStrategy`] as the strategy
-//! for the struct's children, arbitrarily nested struct trees are written with no manual wiring.
+//! routes struct columns to [`StructStrategy`], list columns to [`ListLayoutStrategy`], and
+//! everything else to the configured leaf strategy. Because it hands *itself* (suitably descended)
+//! to those structural writers as the strategy for their children, arbitrarily nested struct/list
+//! trees are written with no manual wiring.
 //!
 //! The dispatcher also owns field-path overrides, letting callers force a specific leaf field —
 //! at any depth — onto a custom strategy.
 
+use std::env;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use async_trait::async_trait;
 use vortex_array::ArrayContext;
@@ -25,10 +28,23 @@ use vortex_utils::aliases::hash_set::HashSet;
 
 use crate::LayoutRef;
 use crate::LayoutStrategy;
+use crate::layouts::list::writer::ListLayoutStrategy;
 use crate::layouts::struct_::StructStrategy;
 use crate::segments::SegmentSinkRef;
 use crate::sequence::SendableSequentialStream;
 use crate::sequence::SequencePointer;
+
+/// Whether the [`TableStrategy`] dispatcher decomposes list columns into a [`ListLayout`] by
+/// default. This is experimental and off unless the environment variable
+/// `VORTEX_EXPERIMENTAL_LIST_LAYOUT` is set to `1`; otherwise list columns fall through to the
+/// leaf strategy (written as flat, non-decomposed arrays).
+///
+/// [`ListLayout`]: crate::layouts::list::ListLayout
+pub fn use_experimental_list_layout() -> bool {
+    static USE_EXPERIMENTAL_LIST_LAYOUT: LazyLock<bool> =
+        LazyLock::new(|| env::var("VORTEX_EXPERIMENTAL_LIST_LAYOUT").is_ok_and(|v| v == "1"));
+    *USE_EXPERIMENTAL_LIST_LAYOUT
+}
 
 /// A configurable strategy for writing nested tabular data, dispatching each (sub)stream to the
 /// structural writer for its dtype.
@@ -36,6 +52,11 @@ use crate::sequence::SequencePointer;
 /// Dispatch rules, applied to the dtype of the stream handed to [`write_stream`]:
 /// - **struct** → [`StructStrategy`], with each field written by its override (if any) or by a
 ///   descended copy of this dispatcher.
+/// - **list** → [`ListLayoutStrategy`], with `elements` written by a descended copy of this
+///   dispatcher (so nested structs/lists recurse) and `offsets`/`validity` by the leaf/validity
+///   strategies. Gated: only when list decomposition is enabled via
+///   [`with_list_layout`][Self::with_list_layout] (off by default); otherwise a list falls through
+///   to the leaf strategy.
 /// - **anything else** → the leaf strategy.
 ///
 /// [`write_stream`]: LayoutStrategy::write_stream
@@ -47,6 +68,11 @@ pub struct TableStrategy {
     validity: Arc<dyn LayoutStrategy>,
     /// The writer for leaf fields, i.e. anything that is not a struct.
     leaf: Arc<dyn LayoutStrategy>,
+    /// Whether to decompose list columns into a [`ListLayout`]. Defaults to `false` (list columns
+    /// are written by `leaf`); enable with [`with_list_layout`][Self::with_list_layout].
+    ///
+    /// [`ListLayout`]: crate::layouts::list::ListLayout
+    decompose_lists: bool,
 }
 
 impl TableStrategy {
@@ -73,6 +99,7 @@ impl TableStrategy {
             leaf_writers: Default::default(),
             validity,
             leaf: fallback,
+            decompose_lists: false,
         }
     }
 
@@ -139,6 +166,15 @@ impl TableStrategy {
         self.validity = validity;
         self
     }
+
+    /// Enable list-column decomposition into a [`ListLayout`] (off by default). Applies at all
+    /// levels of the schema tree.
+    ///
+    /// [`ListLayout`]: crate::layouts::list::ListLayout
+    pub fn with_list_layout(mut self) -> Self {
+        self.decompose_lists = true;
+        self
+    }
 }
 
 impl TableStrategy {
@@ -174,6 +210,19 @@ impl TableStrategy {
             .with_field_writers(field_writers)
     }
 
+    /// Build the [`ListLayoutStrategy`] used to write a list-typed stream at this level.
+    ///
+    /// The `elements` sub-column is routed back through a clean descended dispatcher so nested
+    /// structs/lists recurse; `offsets` go straight to the leaf (they are always a primitive
+    /// column); and `validity` uses the shared validity strategy.
+    fn list_strategy(&self) -> ListLayoutStrategy {
+        ListLayoutStrategy::default()
+            .with_elements(Arc::new(self.descend_clean()))
+            .with_offsets(Arc::clone(&self.leaf))
+            .with_validity(Arc::clone(&self.validity))
+            .with_fallback(Arc::clone(&self.leaf))
+    }
+
     /// Descend into a subfield, retaining only the overrides that apply beneath it (rebased to be
     /// relative to the child).
     fn descend(&self, field: &Field) -> Self {
@@ -192,6 +241,7 @@ impl TableStrategy {
             leaf_writers: new_writers,
             validity: Arc::clone(&self.validity),
             leaf: Arc::clone(&self.leaf),
+            decompose_lists: self.decompose_lists,
         }
     }
 
@@ -202,6 +252,7 @@ impl TableStrategy {
             leaf_writers: HashMap::default(),
             validity: Arc::clone(&self.validity),
             leaf: Arc::clone(&self.leaf),
+            decompose_lists: self.decompose_lists,
         }
     }
 
@@ -244,6 +295,13 @@ impl LayoutStrategy for TableStrategy {
                 .await;
         }
 
+        if dtype.is_list() && self.decompose_lists {
+            return self
+                .list_strategy()
+                .write_stream(ctx, segment_sink, stream, eof, session)
+                .await;
+        }
+
         // Leaf: hand off to the leaf strategy.
         self.leaf
             .write_stream(ctx, segment_sink, stream, eof, session)
@@ -259,7 +317,9 @@ mod tests {
     use vortex_array::ArrayContext;
     use vortex_array::ArrayRef;
     use vortex_array::IntoArray;
+    use vortex_array::arrays::BoolArray;
     use vortex_array::arrays::ChunkedArray;
+    use vortex_array::arrays::ListArray;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::arrays::StructArray;
     use vortex_array::dtype::DType;
@@ -268,6 +328,7 @@ mod tests {
     use vortex_array::dtype::PType;
     use vortex_array::dtype::StructFields;
     use vortex_array::field_path;
+    use vortex_array::validity::Validity;
     use vortex_buffer::buffer;
     use vortex_error::VortexResult;
     use vortex_io::runtime::single::block_on;
@@ -318,6 +379,106 @@ mod tests {
         vortex.struct, dtype: {a=i32, b=i32}, children: 2
         ├── a: vortex.flat, dtype: i32, segment: 0
         └── b: vortex.flat, dtype: i32, segment: 1
+        ");
+        Ok(())
+    }
+
+    /// A `list<list<i32>>` column: the dispatcher recurses into itself so the outer list's
+    /// `elements` are decomposed as a nested `ListLayout`.
+    #[tokio::test]
+    async fn dispatches_nested_list() -> VortexResult<()> {
+        let inner = ListArray::try_new(
+            buffer![1i32, 2, 3, 4, 5, 6].into_array(),
+            buffer![0u32, 2, 5, 5, 6].into_array(),
+            Validity::NonNullable,
+        )?
+        .into_array();
+        let outer = ListArray::try_new(
+            inner,
+            buffer![0u32, 2, 4].into_array(),
+            Validity::NonNullable,
+        )?
+        .into_array();
+
+        let layout = write(&flat_table().with_list_layout(), outer).await?;
+        insta::assert_snapshot!(layout.display_tree(), @r"
+        vortex.list, dtype: list(list(i32)), children: 2
+        ├── elements: vortex.list, dtype: list(i32), children: 2
+        │   ├── elements: vortex.flat, dtype: i32, segment: 1
+        │   └── offsets: vortex.flat, dtype: u64, segment: 2
+        └── offsets: vortex.flat, dtype: u64, segment: 0
+        ");
+        Ok(())
+    }
+
+    /// A `struct<{ items: list<struct<{a,b}>>? }>` column: list decomposition recurses into struct
+    /// decomposition for the elements, and a nullable list writes a validity child.
+    #[tokio::test]
+    async fn dispatches_struct_list_struct() -> VortexResult<()> {
+        let inner_struct = StructArray::from_fields(
+            [
+                ("a", buffer![1i32, 2, 3, 4, 5].into_array()),
+                ("b", buffer![10i32, 20, 30, 40, 50].into_array()),
+            ]
+            .as_slice(),
+        )?
+        .into_array();
+        let items = ListArray::try_new(
+            inner_struct,
+            buffer![0u32, 2, 5, 5].into_array(),
+            Validity::Array(BoolArray::from_iter([true, false, true]).into_array()),
+        )?
+        .into_array();
+        let st = StructArray::from_fields([("items", items)].as_slice())?.into_array();
+
+        let layout = write(&flat_table().with_list_layout(), st).await?;
+        insta::assert_snapshot!(layout.display_tree(), @r"
+        vortex.struct, dtype: {items=list({a=i32, b=i32})?}, children: 1
+        └── items: vortex.list, dtype: list({a=i32, b=i32})?, children: 3
+            ├── elements: vortex.struct, dtype: {a=i32, b=i32}, children: 2
+            │   ├── a: vortex.flat, dtype: i32, segment: 2
+            │   └── b: vortex.flat, dtype: i32, segment: 3
+            ├── offsets: vortex.flat, dtype: u64, segment: 0
+            └── validity: vortex.flat, dtype: bool, segment: 1
+        ");
+        Ok(())
+    }
+
+    /// A multi-chunk `list<i32>` written with a chunked leaf: each sub-column (`elements`,
+    /// `offsets`) becomes its own `ChunkedLayout`, so elements are chunked independently of rows.
+    /// This is the "list-of-chunkeds" topology top-level decomposition unlocks.
+    #[tokio::test]
+    async fn dispatches_chunked_list() -> VortexResult<()> {
+        let chunk0 = ListArray::try_new(
+            buffer![1i32, 2, 3].into_array(),
+            buffer![0u32, 2, 3].into_array(),
+            Validity::NonNullable,
+        )?
+        .into_array();
+        let chunk1 = ListArray::try_new(
+            buffer![4i32, 5, 6, 7].into_array(),
+            buffer![0u32, 1, 4].into_array(),
+            Validity::NonNullable,
+        )?
+        .into_array();
+        let dtype = chunk0.dtype().clone();
+        let chunked = ChunkedArray::try_new(vec![chunk0, chunk1], dtype)?.into_array();
+
+        let flat: Arc<dyn LayoutStrategy> = Arc::new(FlatLayoutStrategy::default());
+        let dispatcher = TableStrategy::new(
+            Arc::clone(&flat),
+            Arc::new(ChunkedLayoutStrategy::new(FlatLayoutStrategy::default())),
+        )
+        .with_list_layout();
+        let layout = write(&dispatcher, chunked).await?;
+        insta::assert_snapshot!(layout.display_tree(), @r"
+        vortex.list, dtype: list(i32), children: 2
+        ├── elements: vortex.chunked, dtype: i32, children: 2
+        │   ├── [0]: vortex.flat, dtype: i32, segment: 0
+        │   └── [1]: vortex.flat, dtype: i32, segment: 1
+        └── offsets: vortex.chunked, dtype: u64, children: 2
+            ├── [0]: vortex.flat, dtype: u64, segment: 2
+            └── [1]: vortex.flat, dtype: u64, segment: 3
         ");
         Ok(())
     }
