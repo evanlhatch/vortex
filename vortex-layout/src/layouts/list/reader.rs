@@ -100,9 +100,8 @@ impl ListReader {
         })
     }
 
-    /// Projection for [`ListChildrenNeeded::Validity`] expressions (`is_null` / `is_not_null` of
-    /// the list): reads only the validity child, synthesizing all-valid for a non-nullable list,
-    /// and never touches the offsets or elements.
+    /// Projection for [`ListChildrenNeeded::Validity`] expressions. Reads only the validity child,
+    /// synthesizing all-valid for a non-nullable list, and never touches the offsets or elements.
     fn project_validity(
         &self,
         row_range: &Range<u64>,
@@ -133,18 +132,19 @@ impl ListReader {
             };
 
             let validity = create_validity(validity_array, nullability).to_array(out_len);
+
             validity.apply(&rewritten)
         }
         .boxed())
     }
 
-    /// Projection for [`ListChildrenNeeded::All`] expressions: materializes the list and applies
+    /// Projection for [`ListChildrenNeeded::All`] expressions. Materializes the list and applies
     /// the expression.
     ///
     /// Dispatches between a bounded read (a strict sub-range over chunked elements, fetching only
     /// the element-chunks the range overlaps) and a whole-chunk read (full range, or a single flat
     /// elements segment where there is nothing to skip).
-    fn project_elements(
+    fn project_all(
         &self,
         row_range: &Range<u64>,
         expr: &Expression,
@@ -152,9 +152,9 @@ impl ListReader {
     ) -> VortexResult<ArrayFuture> {
         let is_full_range = row_range.start == 0 && row_range.end == self.layout.row_count();
         if is_full_range || !self.elements_are_chunked() {
-            self.project_elements_whole_chunk(row_range, expr, mask)
+            self.project_all_concurrent(row_range, expr, mask)
         } else {
-            self.project_elements_bounded(row_range, expr, mask)
+            self.project_all_elements_bounded(row_range, expr, mask)
         }
     }
 
@@ -168,38 +168,28 @@ impl ListReader {
             .is_some()
     }
 
-    /// Whole-chunk read: the entire `elements` buffer, `offsets`, and `validity` are fetched
-    /// concurrently — no offsets→elements round-trip, because the elements bound is the whole
-    /// buffer. The assembled list is sliced to `row_range` and filtered by the caller mask in
-    /// memory.
-    fn project_elements_whole_chunk(
+    /// Whole-chunk read: fetches the entire `elements`, `offsets`, and `validity` children
+    /// concurrently — no offsets→elements round-trip, since the elements bound is the whole buffer.
+    /// The materialized list is sliced to `row_range` and filtered by the caller mask.
+    fn project_all_concurrent(
         &self,
         row_range: &Range<u64>,
         expr: &Expression,
         mask: MaskFuture,
     ) -> VortexResult<ArrayFuture> {
-        let chunk_row_count = self.layout.row_count();
+        let row_count = self.layout.row_count();
         let elements_row_count = self.elements.row_count();
         let nullability = self.layout.dtype().nullability();
         let expr = expr.clone();
         let row_range = row_range.clone();
 
         // Fire all three child reads up front so they run concurrently and overlap the mask await.
-        // Offsets has one extra entry (`n + 1`).
-        let offsets_fut = self.offsets.projection_evaluation(
-            &(0..chunk_row_count + 1),
-            &root(),
-            MaskFuture::new_true(usize::try_from(chunk_row_count + 1)?),
-        )?;
-        let elements_fut = self.elements.projection_evaluation(
-            &(0..elements_row_count),
-            &root(),
-            MaskFuture::new_true(usize::try_from(elements_row_count)?),
-        )?;
+        let offsets_fut = self.fetch_raw_offsets(&(0..row_count))?;
+        let elements_fut = self.fetch_raw_elements(&(0..elements_row_count))?;
         let validity_fut = fetch_validity(
             self.validity.as_ref(),
-            &(0..chunk_row_count),
-            MaskFuture::new_true(usize::try_from(chunk_row_count)?),
+            &(0..row_count),
+            MaskFuture::new_true(usize::try_from(row_count)?),
         )?;
 
         Ok(async move {
@@ -209,7 +199,7 @@ impl ListReader {
                     .into_array();
 
             // Slice the whole-chunk list down to the requested row range.
-            let list = if row_range.start == 0 && row_range.end == chunk_row_count {
+            let list = if row_range.start == 0 && row_range.end == row_count {
                 list
             } else {
                 list.slice(usize::try_from(row_range.start)?..usize::try_from(row_range.end)?)?
@@ -231,9 +221,8 @@ impl ListReader {
     /// Bounded read for a strict sub-range over chunked elements. Reads `offsets[row_range]`,
     /// decodes the first and last offset to bound the elements read to `[first..last)`, then
     /// rebases the offsets to index into that sliced buffer. With chunked elements this fetches
-    /// only the element-chunks the range overlaps, at the cost of one offsets→elements round-trip
-    /// (offsets bound the elements, so they are on the critical path; validity is read alongside).
-    fn project_elements_bounded(
+    /// only the element-chunks the range overlaps, at the cost of one offsets→elements round-trip.
+    fn project_all_elements_bounded(
         &self,
         row_range: &Range<u64>,
         expr: &Expression,
@@ -242,10 +231,9 @@ impl ListReader {
         let nullability = self.layout.dtype().nullability();
         let expr = expr.clone();
         let row_count = usize::try_from(row_range.end - row_range.start)?;
-        let session = self.session.clone();
-        let elements_reader = Arc::clone(&self.elements);
+        let reader = self.clone();
 
-        let offsets_fut = self.fetch_offsets(row_range)?;
+        let offsets_fut = self.fetch_raw_offsets(row_range)?;
         let validity_fut = fetch_validity(
             self.validity.as_ref(),
             row_range,
@@ -253,22 +241,14 @@ impl ListReader {
         )?;
 
         Ok(async move {
-            let offsets = offsets_fut.await?;
-            let elements_range = calculate_elements_range(&offsets, &session)?;
-            let elements_len = usize::try_from(elements_range.end - elements_range.start)?;
+            let (offsets, validity) = try_join!(offsets_fut, validity_fut)?;
+            let elements_range = elements_range_from_offsets(&offsets, &reader.session)?;
 
-            // Read only the elements this range covers; a chunked elements layout skips the rest.
-            let elements = elements_reader
-                .projection_evaluation(
-                    &elements_range,
-                    &root(),
-                    MaskFuture::new_true(elements_len),
-                )?
-                .await?;
+            // Read only the elements this range covers.
+            let elements = reader.fetch_raw_elements(&elements_range)?.await?;
 
             // Rebase the offsets to index into the sliced elements buffer.
             let offsets = rebase_offsets(offsets, elements_range.start)?;
-            let validity = validity_fut.await?;
             let list =
                 ListArray::try_new(elements, offsets, create_validity(validity, nullability))?
                     .into_array();
@@ -285,16 +265,14 @@ impl ListReader {
         .boxed())
     }
 
-    /// Projection for [`ListChildrenNeeded::OffsetsAndValidity`] expressions (`list_length(root())`
-    /// and expressions composed from it): reads offsets and list validity, but never touches
-    /// element values.
-    fn project_offsets(
+    /// Projection for [`ListChildrenNeeded::OffsetsAndValidity`] expressions. Only reads offsets and validity children.
+    fn project_offsets_validity(
         &self,
         row_range: &Range<u64>,
         expr: &Expression,
         mask: MaskFuture,
     ) -> VortexResult<ArrayFuture> {
-        let offsets = self.fetch_offsets(row_range)?;
+        let offsets = self.fetch_raw_offsets(row_range)?;
         let reader = self.clone();
         let row_range = row_range.clone();
         let rewritten = rewrite_offsets_expr(expr)?;
@@ -326,9 +304,11 @@ impl ListReader {
         .boxed())
     }
 
-    /// Fire the offsets read for `row_range`. The offsets child has an extra entry, so reading
+    /// Fire the offsets read for `row_range` in list row space. The offsets child has an extra entry, so reading
     /// `row_range` maps to offsets in `[row_range.start..row_range.end + 1)`.
-    fn fetch_offsets(&self, row_range: &Range<u64>) -> VortexResult<ArrayFuture> {
+    ///
+    /// No mask or expression is applied.
+    fn fetch_raw_offsets(&self, row_range: &Range<u64>) -> VortexResult<ArrayFuture> {
         let offsets_range = row_range.start..(row_range.end + 1);
         let offsets_count = usize::try_from(offsets_range.end - offsets_range.start)?;
         self.offsets.projection_evaluation(
@@ -336,6 +316,15 @@ impl ListReader {
             &root(),
             MaskFuture::new_true(offsets_count),
         )
+    }
+
+    /// Fire the elements read for `row_range` in element space.
+    ///
+    /// No mask or expression is applied.
+    fn fetch_raw_elements(&self, row_range: &Range<u64>) -> VortexResult<ArrayFuture> {
+        let row_count = usize::try_from(row_range.end - row_range.start)?;
+        self.elements
+            .projection_evaluation(row_range, &root(), MaskFuture::new_true(row_count))
     }
 }
 
@@ -446,8 +435,10 @@ impl LayoutReader for ListReader {
         // Read as little as possible based on which list children the expression needs.
         match get_necessary_list_children(expr) {
             ListChildrenNeeded::Validity => self.project_validity(row_range, expr, mask),
-            ListChildrenNeeded::OffsetsAndValidity => self.project_offsets(row_range, expr, mask),
-            ListChildrenNeeded::All => self.project_elements(row_range, expr, mask),
+            ListChildrenNeeded::OffsetsAndValidity => {
+                self.project_offsets_validity(row_range, expr, mask)
+            }
+            ListChildrenNeeded::All => self.project_all(row_range, expr, mask),
         }
     }
 }
@@ -471,8 +462,8 @@ fn fetch_validity(
     .boxed())
 }
 
-/// Read `offsets[0]` and `offsets[-1]` and return the elements-buffer range they bound.
-fn calculate_elements_range(
+/// Read `offsets[0]` and `offsets[-1]` and return the elements range they bound.
+fn elements_range_from_offsets(
     offsets: &ArrayRef,
     session: &VortexSession,
 ) -> VortexResult<Range<u64>> {
@@ -830,7 +821,7 @@ mod tests {
             .downcast_ref::<ListReader>()
             .expect("ListReader");
 
-        let offsets = reader.fetch_offsets(&(1..3))?.await?;
+        let offsets = reader.fetch_raw_offsets(&(1..3))?.await?;
         assert_eq!(materialize_u64_array(offsets), vec![2u64, 4, 5]);
 
         Ok(())
