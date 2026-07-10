@@ -158,8 +158,7 @@ pub struct WriteStrategyBuilder {
     allow_encodings: Option<HashSet<ArrayId>>,
     flat_strategy: Option<Arc<dyn LayoutStrategy>>,
     /// Force list-column decomposition on, overriding the
-    /// [`use_experimental_list_layout`](vortex_layout::layouts::table::use_experimental_list_layout)
-    /// env-var default of off.
+    /// [`use_experimental_list_layout`] env-var default of off.
     list_layout: bool,
 }
 
