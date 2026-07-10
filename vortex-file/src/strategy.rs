@@ -159,8 +159,7 @@ pub struct WriteStrategyBuilder {
     flat_strategy: Option<Arc<dyn LayoutStrategy>>,
     probe_compressor: Option<Arc<dyn CompressorPlugin>>,
     /// Force list-column decomposition on, overriding the
-    /// [`use_experimental_list_layout`](vortex_layout::layouts::table::use_experimental_list_layout)
-    /// env-var default of off.
+    /// [`use_experimental_list_layout`] env-var default of off.
     list_layout: bool,
 }
 
