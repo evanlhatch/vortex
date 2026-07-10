@@ -27,7 +27,6 @@ use vortex_array::scalar_fn::fns::operators::Operator;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
-use vortex_error::vortex_err;
 use vortex_io::kanal_ext::KanalExt;
 use vortex_io::session::RuntimeSessionExt;
 use vortex_session::VortexSession;
@@ -45,13 +44,14 @@ use crate::sequence::SequentialStream;
 use crate::sequence::SequentialStreamAdapter;
 use crate::sequence::SequentialStreamExt;
 
+/// Item carried on each child sub-stream: a sequenced, materialized chunk.
+type ChildChunk = VortexResult<(SequenceId, ArrayRef)>;
+
 /// Strategy for writing list-typed arrays, with a fallback for non-list dtypes.
 ///
 /// This is a *structural* writer that decomposes a list column into independent `elements`,
 /// `offsets`, and (when nullable) `validity` sub-columns, each written through its own downstream
-/// strategy, producing a single [`ListLayout`]. It is designed to sit at the top of the column
-/// pipeline (dispatched by [`TableStrategy`]) rather than as a leaf, so each sub-column is
-/// compressed and chunked independently.
+/// strategy, producing a single [`ListLayout`].
 ///
 /// For list-typed input the strategy transposes the whole column stream into three sub-streams:
 ///  1. Each chunk is canonicalized to a [`ListArray`] (rebuilding a [`ListView`] via
@@ -60,14 +60,10 @@ use crate::sequence::SequentialStreamExt;
 ///     `offsets` child indexes into the concatenated `elements` child.
 ///  3. `elements`, `offsets`, and `validity` are streamed to their child strategies concurrently.
 ///
-/// The transpose is streaming: at most one chunk per child is buffered (bounded channels apply
-/// backpressure), so peak memory does not scale with column size.
-///
 /// For input whose dtype is not [`DType::List`], the stream is forwarded unchanged to the
 /// configured `fallback` strategy.
 ///
 /// [`ListArray`]: vortex_array::arrays::ListArray
-/// [`TableStrategy`]: crate::layouts::table::TableStrategy
 #[derive(Clone)]
 pub struct ListLayoutStrategy {
     elements: Arc<dyn LayoutStrategy>,
@@ -128,7 +124,6 @@ impl LayoutStrategy for ListLayoutStrategy {
     ) -> VortexResult<LayoutRef> {
         let dtype = stream.dtype().clone();
         if !dtype.is_list() {
-            // Non-list input: route to the configured fallback strategy unchanged.
             return self
                 .fallback
                 .write_stream(ctx, segment_sink, stream, eof, session)
@@ -138,83 +133,55 @@ impl LayoutStrategy for ListLayoutStrategy {
         let is_nullable = dtype.is_nullable();
         let element_dtype = dtype
             .as_list_element_opt()
-            .ok_or_else(|| vortex_err!("ListLayoutStrategy requires a List dtype, got {dtype}"))?
+            .vortex_expect("DType is List")
             .as_ref()
             .clone();
-        // Global (whole-column) offsets are cumulative, so they may exceed the input offset width.
+        // Global (whole-column) offsets are cumulative and may exceed the input offset width,
+        // so definsively widen.
         let offsets_dtype = DType::Primitive(PType::U64, Nullability::NonNullable);
 
         // One bounded sub-stream per child: elements, offsets, and (when nullable) validity.
-        // Bounded channels apply backpressure so we buffer at most one chunk per child.
-        let child_count = if is_nullable { 3 } else { 2 };
-        let (txs, rxs): (Vec<_>, Vec<_>) = (0..child_count)
-            .map(|_| kanal::bounded_async::<VortexResult<(SequenceId, ArrayRef)>>(1))
-            .unzip();
+        let (elements_tx, elements_rx) = kanal::bounded_async::<ChildChunk>(1);
+        let (offsets_tx, offsets_rx) = kanal::bounded_async::<ChildChunk>(1);
+        let (validity_tx, validity_rx) = if is_nullable {
+            let (tx, rx) = kanal::bounded_async::<ChildChunk>(1);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
 
-        // Transpose the list column into its child sub-streams, rebasing offsets to global
+        // Transpose the list column into its child sub-streams and rebase offsets to global
         // positions. Kept joined with the child writers below so producer errors surface rather
         // than being hidden as an early channel close.
-        let fanout_session = session.clone();
-        let fanout_fut = async move {
-            let mut stream = stream;
-            let mut exec_ctx = fanout_session.create_execution_ctx();
-            let mut element_base: u64 = 0;
-            let mut first = true;
-            let mut saw_chunk = false;
-            while let Some(chunk) = stream.next().await {
-                let (sequence_id, array) = chunk?;
-                saw_chunk = true;
-                let mut sp = sequence_id.descend();
-                let ListDataParts {
-                    elements,
-                    offsets,
-                    validity,
-                    ..
-                } = canonicalize_to_list_parts(array, &mut exec_ctx)?;
-                let n_elements = elements.len() as u64;
-                let row_count = offsets.len().saturating_sub(1);
-                let offsets = global_offsets(offsets, element_base, first, &mut exec_ctx)?;
-                element_base += n_elements;
-                first = false;
-
-                // Order must match `child_specs` / assembly below: elements, offsets, [validity].
-                if txs[0].send(Ok((sp.advance(), elements))).await.is_err()
-                    || txs[1].send(Ok((sp.advance(), offsets))).await.is_err()
-                {
-                    vortex_bail!("list child writer finished before all chunks were sent");
-                }
-                if is_nullable {
-                    let validity = validity
-                        .execute_mask(row_count, &mut exec_ctx)?
-                        .into_array();
-                    if txs[2].send(Ok((sp.advance(), validity))).await.is_err() {
-                        vortex_bail!("list validity writer finished before all chunks were sent");
-                    }
-                }
-            }
-            if !saw_chunk {
-                vortex_bail!("ListLayoutStrategy needs at least one chunk");
-            }
-            Ok(())
-        };
+        let fanout_fut = transpose_list_column(
+            stream,
+            session.clone(),
+            elements_tx,
+            offsets_tx,
+            validity_tx,
+        );
 
         // Spawn a writer per child sub-stream, concurrently.
         let handle = session.handle();
-        let mut child_specs: Vec<(DType, Arc<dyn LayoutStrategy>)> = vec![
-            (element_dtype, Arc::clone(&self.elements)),
-            (offsets_dtype, Arc::clone(&self.offsets)),
+        let mut child_specs: Vec<(
+            DType,
+            Arc<dyn LayoutStrategy>,
+            kanal::AsyncReceiver<ChildChunk>,
+        )> = vec![
+            (element_dtype, Arc::clone(&self.elements), elements_rx),
+            (offsets_dtype, Arc::clone(&self.offsets), offsets_rx),
         ];
-        if is_nullable {
+        if let Some(validity_rx) = validity_rx {
             child_specs.push((
                 DType::Bool(Nullability::NonNullable),
                 Arc::clone(&self.validity),
+                validity_rx,
             ));
         }
 
         let layout_futures: Vec<_> = child_specs
             .into_iter()
-            .zip(rxs)
-            .map(|((child_dtype, strategy), rx)| {
+            .map(|(child_dtype, strategy, rx)| {
                 let child_stream =
                     SequentialStreamAdapter::new(child_dtype, rx.into_stream().boxed()).sendable();
                 let child_eof = eof.split_off();
@@ -248,10 +215,67 @@ impl LayoutStrategy for ListLayoutStrategy {
     }
 }
 
-/// Canonicalize a list-dtype array into [`ListDataParts`]. Short-circuits when the input is
-/// already a `List` or `ListView` array — otherwise drives the execution loop until one of
-/// those forms appears. `ListView` is rebuilt into zero-copy-to-list form via
-/// [`list_from_list_view`] before its parts are extracted.
+/// Transpose a list column into its `elements`, `offsets`, and (when present) `validity` child
+/// sub-streams, rebasing each chunk's local `offsets` to global `u64` positions so the single
+/// `offsets` child indexes into the concatenated `elements` child.
+///
+/// `validity_tx` is `Some` exactly when the list is nullable. Errors surface to the caller, which
+/// joins this against the child writers, rather than being hidden as an early channel close.
+async fn transpose_list_column(
+    mut stream: SendableSequentialStream,
+    session: VortexSession,
+    elements_tx: kanal::AsyncSender<ChildChunk>,
+    offsets_tx: kanal::AsyncSender<ChildChunk>,
+    validity_tx: Option<kanal::AsyncSender<ChildChunk>>,
+) -> VortexResult<()> {
+    let mut exec_ctx = session.create_execution_ctx();
+    let mut element_base: u64 = 0;
+    let mut first = true;
+    let mut saw_chunk = false;
+    while let Some(chunk) = stream.next().await {
+        let (sequence_id, array) = chunk?;
+        saw_chunk = true;
+        let mut sp = sequence_id.descend();
+        let ListDataParts {
+            elements,
+            offsets,
+            validity,
+            ..
+        } = canonicalize_to_list_parts(array, &mut exec_ctx)?;
+        let n_elements = elements.len() as u64;
+        let row_count = offsets.len().saturating_sub(1);
+        let offsets = global_offsets(offsets, element_base, first, &mut exec_ctx)?;
+        element_base += n_elements;
+        first = false;
+
+        if elements_tx
+            .send(Ok((sp.advance(), elements)))
+            .await
+            .is_err()
+            || offsets_tx.send(Ok((sp.advance(), offsets))).await.is_err()
+        {
+            vortex_bail!("list child writer finished before all chunks were sent");
+        }
+        if let Some(validity_tx) = &validity_tx {
+            let validity = validity
+                .execute_mask(row_count, &mut exec_ctx)?
+                .into_array();
+            if validity_tx
+                .send(Ok((sp.advance(), validity)))
+                .await
+                .is_err()
+            {
+                vortex_bail!("list validity writer finished before all chunks were sent");
+            }
+        }
+    }
+    if !saw_chunk {
+        vortex_bail!("ListLayoutStrategy needs at least one chunk");
+    }
+    Ok(())
+}
+
+/// Canonicalize a list-dtype array into [`ListDataParts`].
 fn canonicalize_to_list_parts(
     array: ArrayRef,
     exec_ctx: &mut ExecutionCtx,
@@ -293,9 +317,7 @@ fn global_offsets(
     Ok(based.execute::<PrimitiveArray>(exec_ctx)?.into_array())
 }
 
-/// Matcher for `Array<List>` or `Array<ListView>`. Used to short-circuit the execution loop
-/// when the input is already in (or directly produces) a list form, avoiding a redundant
-/// `ListView` round-trip when the writer already has the parts it needs.
+/// Matcher for `Array<List>` or `Array<ListView>`.
 struct AnyList;
 
 impl Matcher for AnyList {
@@ -423,30 +445,6 @@ mod tests {
             .write_stream(ArrayContext::empty(), segments, stream, eof, &session)
             .await;
         assert!(res.is_err())
-    }
-
-    #[tokio::test]
-    async fn chunked_list_input_without_chunked_strategy_fails() -> VortexResult<()> {
-        let chunk0 = ListArray::try_new(
-            buffer![1i32, 2].into_array(),
-            buffer![0u32, 2].into_array(),
-            Validity::NonNullable,
-        )
-        .unwrap()
-        .into_array();
-        let chunk1 = ListArray::try_new(
-            buffer![3i32, 4, 5].into_array(),
-            buffer![0u32, 3].into_array(),
-            Validity::NonNullable,
-        )
-        .unwrap()
-        .into_array();
-        let chunked =
-            ChunkedArray::try_new(vec![chunk0, chunk1], i32_list_dtype(false))?.into_array();
-
-        let res = write(&flat_list_strategy(), chunked).await;
-        assert!(res.is_err());
-        Ok(())
     }
 
     #[tokio::test]

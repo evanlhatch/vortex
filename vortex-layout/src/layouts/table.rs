@@ -34,12 +34,11 @@ use crate::segments::SegmentSinkRef;
 use crate::sequence::SendableSequentialStream;
 use crate::sequence::SequencePointer;
 
-/// Whether the [`TableStrategy`] dispatcher decomposes list columns into a [`ListLayout`] by
-/// default. This is experimental and off unless the environment variable
-/// `VORTEX_EXPERIMENTAL_LIST_LAYOUT` is set to `1`; otherwise list columns fall through to the
-/// leaf strategy (written as flat, non-decomposed arrays).
+/// Whether [`TableStrategy`] writes list fields using a [`ListLayoutStrategy`] by
+/// default. Disabled unless the environment variable `VORTEX_EXPERIMENTAL_LIST_LAYOUT`
+/// is set to `1`.
 ///
-/// [`ListLayout`]: crate::layouts::list::ListLayout
+/// [`ListLayoutStrategy`]: crate::layouts::list::writer::ListLayoutStrategy
 pub fn use_experimental_list_layout() -> bool {
     static USE_EXPERIMENTAL_LIST_LAYOUT: LazyLock<bool> =
         LazyLock::new(|| env::var("VORTEX_EXPERIMENTAL_LIST_LAYOUT").is_ok_and(|v| v == "1"));
@@ -68,11 +67,10 @@ pub struct TableStrategy {
     validity: Arc<dyn LayoutStrategy>,
     /// The writer for leaf fields, i.e. anything that is not a struct.
     leaf: Arc<dyn LayoutStrategy>,
-    /// Whether to decompose list columns into a [`ListLayout`]. Defaults to `false` (list columns
-    /// are written by `leaf`); enable with [`with_list_layout`][Self::with_list_layout].
+    /// Whether to write list fields using [`ListLayoutStrategy`].
     ///
-    /// [`ListLayout`]: crate::layouts::list::ListLayout
-    decompose_lists: bool,
+    /// [`ListLayoutStrategy`]: crate::layouts::list::writer::ListLayoutStrategy
+    use_list_layout: bool,
 }
 
 impl TableStrategy {
@@ -99,7 +97,7 @@ impl TableStrategy {
             leaf_writers: Default::default(),
             validity,
             leaf: fallback,
-            decompose_lists: false,
+            use_list_layout: false,
         }
     }
 
@@ -167,12 +165,9 @@ impl TableStrategy {
         self
     }
 
-    /// Enable list-column decomposition into a [`ListLayout`] (off by default). Applies at all
-    /// levels of the schema tree.
-    ///
-    /// [`ListLayout`]: crate::layouts::list::ListLayout
+    /// Enable writing list fields with [`ListLayoutStrategy`].
     pub fn with_list_layout(mut self) -> Self {
-        self.decompose_lists = true;
+        self.use_list_layout = true;
         self
     }
 }
@@ -210,7 +205,7 @@ impl TableStrategy {
             .with_field_writers(field_writers)
     }
 
-    /// Build the [`ListLayoutStrategy`] used to write a list-typed stream at this level.
+    /// Build the [`ListLayoutStrategy`] used to write a list field stream at this level.
     ///
     /// The `elements` sub-column is routed back through a clean descended dispatcher so nested
     /// structs/lists recurse; `offsets` go straight to the leaf (they are always a primitive
@@ -241,7 +236,7 @@ impl TableStrategy {
             leaf_writers: new_writers,
             validity: Arc::clone(&self.validity),
             leaf: Arc::clone(&self.leaf),
-            decompose_lists: self.decompose_lists,
+            use_list_layout: self.use_list_layout,
         }
     }
 
@@ -252,7 +247,7 @@ impl TableStrategy {
             leaf_writers: HashMap::default(),
             validity: Arc::clone(&self.validity),
             leaf: Arc::clone(&self.leaf),
-            decompose_lists: self.decompose_lists,
+            use_list_layout: self.use_list_layout,
         }
     }
 
@@ -295,7 +290,7 @@ impl LayoutStrategy for TableStrategy {
                 .await;
         }
 
-        if dtype.is_list() && self.decompose_lists {
+        if dtype.is_list() && self.use_list_layout {
             return self
                 .list_strategy()
                 .write_stream(ctx, segment_sink, stream, eof, session)

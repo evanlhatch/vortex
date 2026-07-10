@@ -158,9 +158,10 @@ pub struct WriteStrategyBuilder {
     allow_encodings: Option<HashSet<ArrayId>>,
     flat_strategy: Option<Arc<dyn LayoutStrategy>>,
     probe_compressor: Option<Arc<dyn CompressorPlugin>>,
-    /// Force list-column decomposition on, overriding the
-    /// [`use_experimental_list_layout`] env-var default of off.
-    list_layout: bool,
+    /// Whether to write list fields using [`ListLayoutStrategy`].
+    ///
+    /// [`ListLayoutStrategy`]: vortex_layout::layouts::list::writer::ListLayoutStrategy
+    use_list_layout: bool,
 }
 
 impl Default for WriteStrategyBuilder {
@@ -174,7 +175,7 @@ impl Default for WriteStrategyBuilder {
             allow_encodings: Some(ALLOWED_ENCODINGS.clone()),
             flat_strategy: None,
             probe_compressor: None,
-            list_layout: false,
+            use_list_layout: use_experimental_list_layout(),
         }
     }
 }
@@ -189,11 +190,11 @@ impl WriteStrategyBuilder {
         self
     }
 
-    /// Enable list-column decomposition, overriding the env-var default of off. When enabled, list
-    /// columns are written as a `ListLayout` (independently compressed/chunked
-    /// elements/offsets/validity) rather than as flat arrays.
+    /// Enable writing list fields with [`ListLayoutStrategy`].
+    ///
+    /// [`ListLayoutStrategy`]: vortex_layout::layouts::list::writer::ListLayoutStrategy
     pub fn with_list_layout(mut self) -> Self {
-        self.list_layout = true;
+        self.use_list_layout = true;
         self
     }
 
@@ -263,9 +264,7 @@ impl WriteStrategyBuilder {
             Arc::new(FlatLayoutStrategy::default())
         };
 
-        // 7. for each chunk create a flat layout. List columns are decomposed above this point by
-        // the `TableStrategy` dispatcher (into independently-compressed elements/offsets/validity
-        // sub-columns), so the per-chunk leaf only ever sees flat, non-list chunks.
+        // 7. for each chunk create a flat layout
         let chunked = ChunkedLayoutStrategy::new(Arc::clone(&flat));
         // 6. buffer chunks so they end up with closer segment ids physically
         let buffered = BufferedStrategy::new(chunked, 2 * ONE_MEG); // 2MB
@@ -353,9 +352,8 @@ impl WriteStrategyBuilder {
         let mut table_strategy =
             TableStrategy::new(Arc::new(validity_strategy), Arc::new(repartition))
                 .with_field_writers(self.field_writers);
-        // List decomposition is experimental: enabled by an explicit builder opt-in or the
-        // `VORTEX_EXPERIMENTAL_LIST_LAYOUT` env var; off otherwise.
-        if self.list_layout || use_experimental_list_layout() {
+
+        if self.use_list_layout {
             table_strategy = table_strategy.with_list_layout();
         }
 

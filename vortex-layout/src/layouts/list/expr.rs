@@ -10,8 +10,7 @@ use vortex_array::scalar_fn::fns::is_null::IsNull;
 use vortex_array::scalar_fn::fns::list_length::ListLength;
 use vortex_error::VortexResult;
 
-/// The deepest list child an expression needs, cheapest first, where I/O cost order is defined as
-/// `Validity < OffsetsAndValidity < All`.
+/// The minimal set of list children an expression needs for evaluation.
 ///
 /// For example:
 ///     - `is_null(root())` only needs the validity child.
@@ -21,13 +20,13 @@ use vortex_error::VortexResult;
 pub(super) enum ListChildrenNeeded {
     /// Only the validity child is needed (`is_null` / `is_not_null`).
     Validity,
-    /// The offsets and validity children are needed, but not the element values (`list_length`).
+    /// Only the offsets and validity children are needed (`list_length`).
     OffsetsAndValidity,
     /// All children are needed.
     All,
 }
 
-/// The minimal list children needed to evaluate `expr`, where `root()` is a field with list dtype.
+/// The minimal set of list children needed to evaluate `expr`, where `root()` is a field with list dtype.
 pub(super) fn get_necessary_list_children(expr: &Expression) -> ListChildrenNeeded {
     if is_null_root(expr) {
         return ListChildrenNeeded::Validity;
