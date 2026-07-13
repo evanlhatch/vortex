@@ -230,6 +230,10 @@ impl LayoutReader for FixedSizeListReader {
         let list_size = u64::from(self.layout.list_size());
         if list_size != 0 {
             let element_range = element_range(split_range.row_range(), list_size)?;
+
+            // The elements reader reports natural splits in element coordinates. Keep these
+            // temporary splits in element space, then convert them back to fixed-size-list row
+            // coordinates below, rounding forward so a split never cuts through a parent row.
             let mut element_splits = RowSplits::new_capacity(8);
             self.elements.register_splits(
                 field_mask,
@@ -410,7 +414,11 @@ mod tests {
 
     use super::*;
     use crate::LayoutStrategy;
+    use crate::layouts::chunked::writer::ChunkedLayoutStrategy;
     use crate::layouts::fixed_size_list::writer::FixedSizeListLayoutStrategy;
+    use crate::layouts::flat::writer::FlatLayoutStrategy;
+    use crate::layouts::repartition::RepartitionStrategy;
+    use crate::layouts::repartition::RepartitionWriterOptions;
     use crate::scan::split_by::SplitBy;
     use crate::segments::SegmentSource;
     use crate::segments::TestSegments;
@@ -421,14 +429,33 @@ mod tests {
     async fn write_layout(
         array: ArrayRef,
     ) -> VortexResult<(Arc<dyn SegmentSource>, crate::LayoutRef)> {
+        write_layout_with_strategy(&FixedSizeListLayoutStrategy::default(), array).await
+    }
+
+    async fn write_layout_with_strategy<S: LayoutStrategy>(
+        strategy: &S,
+        array: ArrayRef,
+    ) -> VortexResult<(Arc<dyn SegmentSource>, crate::LayoutRef)> {
         let segments = Arc::new(TestSegments::default());
         let segments_ref: Arc<dyn SegmentSource> = Arc::<TestSegments>::clone(&segments);
         let (ptr, eof) = SequenceId::root().split();
         let stream = array.to_array_stream().sequenced(ptr);
-        let layout = FixedSizeListLayoutStrategy::default()
+        let layout = strategy
             .write_stream(ArrayContext::empty(), segments, stream, eof, &SESSION)
             .await?;
         Ok((segments_ref, layout))
+    }
+
+    fn repartitioned_chunk_strategy(block_len_multiple: usize) -> Arc<dyn LayoutStrategy> {
+        Arc::new(RepartitionStrategy::new(
+            ChunkedLayoutStrategy::new(FlatLayoutStrategy::default()),
+            RepartitionWriterOptions {
+                block_size_minimum: 0,
+                block_len_multiple,
+                block_size_target: None,
+                canonicalize: true,
+            },
+        ))
     }
 
     fn create_fsl(nullable: bool) -> ArrayRef {
@@ -538,6 +565,88 @@ mod tests {
         )?;
 
         assert_eq!(splits, vec![0, 4]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn layout_splits_round_chunked_element_boundaries_to_parent_rows() -> VortexResult<()> {
+        let fsl = FixedSizeListArray::new(
+            PrimitiveArray::from_iter(0i32..15).into_array(),
+            3,
+            Validity::NonNullable,
+            5,
+        )
+        .into_array();
+        let strategy =
+            FixedSizeListLayoutStrategy::default().with_elements(repartitioned_chunk_strategy(4));
+        let ctx = LayoutReaderContext::new();
+        let (segments, layout) = write_layout_with_strategy(&strategy, fsl).await?;
+        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+
+        let splits = SplitBy::Layout.splits(
+            reader.as_ref(),
+            &(0..5),
+            &[FieldMask::Exact(FieldPath::root())],
+        )?;
+
+        // Element boundaries 4, 8, and 12 map to parent rows ceil(n / 3): 2, 3, and 4.
+        assert_eq!(splits, vec![0, 2, 3, 4, 5]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn layout_splits_map_through_nested_fixed_size_lists() -> VortexResult<()> {
+        let inner = FixedSizeListArray::new(
+            PrimitiveArray::from_iter(0i32..24).into_array(),
+            3,
+            Validity::NonNullable,
+            8,
+        )
+        .into_array();
+        let outer = FixedSizeListArray::new(inner, 2, Validity::NonNullable, 4).into_array();
+
+        let inner_strategy =
+            FixedSizeListLayoutStrategy::default().with_elements(repartitioned_chunk_strategy(7));
+        let outer_strategy =
+            FixedSizeListLayoutStrategy::default().with_elements(Arc::new(inner_strategy));
+        let ctx = LayoutReaderContext::new();
+        let (segments, layout) = write_layout_with_strategy(&outer_strategy, outer).await?;
+        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+
+        let splits = SplitBy::Layout.splits(
+            reader.as_ref(),
+            &(0..4),
+            &[FieldMask::Exact(FieldPath::root())],
+        )?;
+
+        // Primitive boundaries 7, 14, and 21 first map to inner rows 3, 5, and 7,
+        // then to outer rows 2, 3, and 4. The range end already supplies row 4.
+        assert_eq!(splits, vec![0, 2, 3, 4]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn layout_splits_preserve_chunked_validity_row_boundaries() -> VortexResult<()> {
+        let fsl = FixedSizeListArray::new(
+            PrimitiveArray::from_iter(0i32..15).into_array(),
+            3,
+            Validity::Array(BoolArray::from_iter([true, false, true, true, false]).into_array()),
+            5,
+        )
+        .into_array();
+        let strategy =
+            FixedSizeListLayoutStrategy::default().with_validity(repartitioned_chunk_strategy(2));
+        let ctx = LayoutReaderContext::new();
+        let (segments, layout) = write_layout_with_strategy(&strategy, fsl).await?;
+        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+
+        let splits = SplitBy::Layout.splits(
+            reader.as_ref(),
+            &(0..5),
+            &[FieldMask::Exact(FieldPath::root())],
+        )?;
+
+        assert_eq!(splits, vec![0, 2, 4, 5]);
         Ok(())
     }
 
