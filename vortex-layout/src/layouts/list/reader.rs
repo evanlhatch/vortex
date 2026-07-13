@@ -349,26 +349,14 @@ impl LayoutReader for ListReader {
         Ok(())
     }
 
+    //TODO(mk): handle zones for lists
     fn pruning_evaluation(
         &self,
-        row_range: &Range<u64>,
-        expr: &Expression,
+        _row_range: &Range<u64>,
+        _expr: &Expression,
         mask: Mask,
     ) -> VortexResult<MaskFuture> {
-        // Only validity-class predicates (`is_null` / `is_not_null` of the list) can be pruned via
-        // a child zone map: they rewrite to a predicate over the validity bool child, which prunes
-        // against its own zones. `list_length` is *not* prunable from the offsets child (its zones
-        // cover offset values, not per-row lengths), and element-value predicates don't map to
-        // row-space zones — both pass through unpruned.
-        if get_necessary_list_children(expr) != ListChildrenNeeded::Validity {
-            return Ok(MaskFuture::ready(mask));
-        }
-        let Some(validity) = self.validity.as_ref() else {
-            // Non-nullable list: no nulls, so nothing to prune on.
-            return Ok(MaskFuture::ready(mask));
-        };
-        let rewritten = rewrite_validity_expr(expr)?;
-        validity.pruning_evaluation(row_range, &rewritten, mask)
+        Ok(MaskFuture::ready(mask))
     }
 
     fn filter_evaluation(
