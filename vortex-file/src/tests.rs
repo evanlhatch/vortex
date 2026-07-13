@@ -20,6 +20,7 @@ use vortex_array::arrays::ChunkedArray;
 use vortex_array::arrays::ConstantArray;
 use vortex_array::arrays::DecimalArray;
 use vortex_array::arrays::Dict;
+use vortex_array::arrays::FixedSizeListArray;
 use vortex_array::arrays::ListArray;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::arrays::StructArray;
@@ -1707,6 +1708,26 @@ async fn nested_list_of_list_roundtrip() -> VortexResult<()> {
         Validity::NonNullable,
     )?
     .into_array();
+    let st = StructArray::from_fields(&[("nested", outer)])?.into_array();
+
+    let result = write_read_roundtrip(st.clone()).await?;
+    assert_arrays_eq!(result, st, &mut SESSION.create_execution_ctx());
+    Ok(())
+}
+
+/// A `fixed_size_list<fixed_size_list<i32>>` column round-trips through the `TableStrategy`
+/// dispatcher, exercising fixed-size-list decomposition recursing into itself.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn nested_fixed_size_list_of_fixed_size_list_roundtrip() -> VortexResult<()> {
+    let inner = FixedSizeListArray::new(
+        buffer![1i32, 2, 3, 4, 5, 6, 7, 8].into_array(),
+        2,
+        Validity::NonNullable,
+        4,
+    )
+    .into_array();
+    let outer = FixedSizeListArray::new(inner, 2, Validity::NonNullable, 2).into_array();
     let st = StructArray::from_fields(&[("nested", outer)])?.into_array();
 
     let result = write_read_roundtrip(st.clone()).await?;

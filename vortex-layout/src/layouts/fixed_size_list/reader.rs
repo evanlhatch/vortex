@@ -11,20 +11,18 @@ use vortex_array::ArrayRef;
 use vortex_array::IntoArray;
 use vortex_array::MaskFuture;
 use vortex_array::VortexSessionExecute;
+use vortex_array::arrays::ConstantArray;
 use vortex_array::arrays::FixedSizeListArray;
+use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::FieldMask;
 use vortex_array::dtype::Nullability;
+use vortex_array::dtype::PType;
 use vortex_array::expr::Expression;
-use vortex_array::expr::is_root;
-use vortex_array::expr::not;
 use vortex_array::expr::root;
-use vortex_array::scalar_fn::fns::is_not_null::IsNotNull;
-use vortex_array::scalar_fn::fns::is_null::IsNull;
 use vortex_array::validity::Validity;
 use vortex_error::VortexResult;
 use vortex_error::vortex_err;
-use vortex_mask::AllOr;
 use vortex_mask::Mask;
 use vortex_session::VortexSession;
 
@@ -35,9 +33,17 @@ use crate::LayoutReaderRef;
 use crate::RowSplits;
 use crate::SplitRange;
 use crate::layouts::fixed_size_list::FixedSizeListLayout;
+use crate::layouts::fixed_size_list::expr::FixedSizeListChildrenNeeded;
+use crate::layouts::fixed_size_list::expr::get_necessary_fixed_size_list_children;
+use crate::layouts::fixed_size_list::expr::rewrite_list_length_expr;
+use crate::layouts::fixed_size_list::expr::rewrite_validity_expr;
 use crate::segments::SegmentSource;
 
 type OptionalArrayFuture = BoxFuture<'static, VortexResult<Option<ArrayRef>>>;
+
+/// The threshold of mask density below which we push the input mask into projection evaluation,
+/// and above which we evaluate the expression over all rows and intersect afterward.
+const EXPR_EVAL_THRESHOLD: f64 = 0.2;
 
 #[derive(Clone)]
 pub(super) struct FixedSizeListReader {
@@ -118,25 +124,78 @@ impl FixedSizeListReader {
         .boxed())
     }
 
+    fn project_list_length(
+        &self,
+        row_range: &Range<u64>,
+        expr: &Expression,
+        mask: MaskFuture,
+    ) -> VortexResult<ArrayFuture> {
+        let list_size = u64::from(self.layout.list_size());
+        let nullability = self.layout.dtype().nullability();
+        let row_count = usize::try_from(row_range.end - row_range.start)?;
+        let rewritten = rewrite_list_length_expr(expr)?;
+        let validity_fut = fetch_validity(
+            self.validity.as_ref(),
+            row_range,
+            MaskFuture::new_true(row_count),
+        )?;
+
+        Ok(async move {
+            let validity = validity_fut.await?;
+            let lengths = ConstantArray::new(list_size, row_count)
+                .into_array()
+                .cast(DType::Primitive(PType::U64, nullability))?;
+            let lengths = apply_validity(lengths, validity, nullability)?;
+
+            let mask = mask.await?;
+            let lengths = if mask.all_true() {
+                lengths
+            } else {
+                lengths.filter(mask)?
+            };
+            lengths.apply(&rewritten)
+        }
+        .boxed())
+    }
+
     fn project_elements(
         &self,
         row_range: &Range<u64>,
         expr: &Expression,
         mask: MaskFuture,
     ) -> VortexResult<ArrayFuture> {
-        let projection = ElementsProjection {
-            reader: self.clone(),
-            expr: expr.clone(),
-            row_range: row_range.clone(),
-        };
+        let reader = self.clone();
+        let expr = expr.clone();
+        let row_range = row_range.clone();
 
         Ok(async move {
+            let row_count = usize::try_from(row_range.end - row_range.start)?;
+            let list_size = u64::from(reader.layout.list_size());
+            let elements_range = element_range(&row_range, list_size)?;
+            let elements_len = usize::try_from(elements_range.end - elements_range.start)?;
+
+            let elements_fut = reader.elements.projection_evaluation(
+                &elements_range,
+                &root(),
+                MaskFuture::new_true(elements_len),
+            )?;
+
+            let validity_fut = fetch_validity(
+                reader.validity.as_ref(),
+                &row_range,
+                MaskFuture::new_true(row_count),
+            )?;
+
+            let (elements, validity) = try_join!(elements_fut, validity_fut)?;
+            let fsl = build_fixed_size_list(elements, validity, reader.layout.dtype(), row_count)?;
+
             let mask = mask.await?;
-            if mask.all_true() {
-                projection.project_full_range().await
+            let fsl = if mask.all_true() {
+                fsl
             } else {
-                projection.project_sparse(mask).await
-            }
+                fsl.filter(mask)?
+            };
+            fsl.apply(&expr)
         }
         .boxed())
     }
@@ -165,17 +224,43 @@ impl LayoutReader for FixedSizeListReader {
         split_range: &SplitRange,
         splits: &mut RowSplits,
     ) -> VortexResult<()> {
-        self.elements.register_splits(
-            field_mask,
-            &element_split_range(split_range, self.layout.list_size())?,
-            splits,
-        )?;
+        split_range.check_bounds(self.layout.row_count())?;
+        splits.push(split_range.root_row_range().end);
+
+        let list_size = u64::from(self.layout.list_size());
+        if list_size != 0 {
+            let element_range = element_range(split_range.row_range(), list_size)?;
+            let mut element_splits = RowSplits::new_capacity(8);
+            self.elements.register_splits(
+                field_mask,
+                &SplitRange::try_new(0, element_range.clone())?,
+                &mut element_splits,
+            )?;
+
+            for element_split in element_splits.into_sorted_deduped() {
+                if element_split <= element_range.start || element_split >= element_range.end {
+                    continue;
+                }
+                let element_offset = element_split - element_range.start;
+                let row_offset = element_offset.div_ceil(list_size);
+                let root_row = split_range
+                    .root_row_range()
+                    .start
+                    .checked_add(row_offset)
+                    .ok_or_else(|| vortex_err!("fixed-size-list split offset overflow"))?;
+                if root_row < split_range.root_row_range().end {
+                    splits.push(root_row);
+                }
+            }
+        }
+
         if let Some(validity) = &self.validity {
             validity.register_splits(field_mask, split_range, splits)?;
         }
         Ok(())
     }
 
+    // TODO(mk): either have zone pruning upstream or implement here
     fn pruning_evaluation(
         &self,
         _row_range: &Range<u64>,
@@ -203,16 +288,18 @@ impl LayoutReader for FixedSizeListReader {
                 return Ok(mask);
             }
 
-            let predicate = reader
-                .projection_evaluation(&row_range, &expr, MaskFuture::ready(mask.clone()))?
-                .await?;
-            let mut ctx = session.create_execution_ctx();
-            let predicate_mask = predicate.null_as_false().execute(&mut ctx)?;
-
-            if mask.all_true() {
-                Ok(predicate_mask)
-            } else {
+            if mask.density() < EXPR_EVAL_THRESHOLD {
+                let predicate = reader
+                    .projection_evaluation(&row_range, &expr, MaskFuture::ready(mask.clone()))?
+                    .await?;
+                let predicate_mask = predicate_array_to_mask(predicate, &session)?;
                 Ok(mask.intersect_by_rank(&predicate_mask))
+            } else {
+                let predicate = reader
+                    .projection_evaluation(&row_range, &expr, MaskFuture::new_true(len))?
+                    .await?;
+                let predicate_mask = predicate_array_to_mask(predicate, &session)?;
+                Ok(mask & &predicate_mask)
             }
         }))
     }
@@ -223,21 +310,14 @@ impl LayoutReader for FixedSizeListReader {
         expr: &Expression,
         mask: MaskFuture,
     ) -> VortexResult<ArrayFuture> {
-        match classify(expr) {
-            ExprClass::Validity => self.project_validity(row_range, expr, mask),
-            ExprClass::Elements => self.project_elements(row_range, expr, mask),
+        match get_necessary_fixed_size_list_children(expr) {
+            FixedSizeListChildrenNeeded::Validity => self.project_validity(row_range, expr, mask),
+            FixedSizeListChildrenNeeded::ListLengthAndValidity => {
+                self.project_list_length(row_range, expr, mask)
+            }
+            FixedSizeListChildrenNeeded::Elements => self.project_elements(row_range, expr, mask),
         }
     }
-}
-
-fn element_split_range(split_range: &SplitRange, list_size: u32) -> VortexResult<SplitRange> {
-    let list_size = u64::from(list_size);
-    let row_range = element_range(split_range.row_range(), list_size)?;
-    let row_offset = split_range
-        .row_offset()
-        .checked_mul(list_size)
-        .ok_or_else(|| vortex_err!("fixed-size-list split offset overflow"))?;
-    SplitRange::try_new(row_offset, row_range)
 }
 
 fn element_range(row_range: &Range<u64>, list_size: u64) -> VortexResult<Range<u64>> {
@@ -279,12 +359,24 @@ fn create_validity(validity_array: Option<ArrayRef>, nullability: Nullability) -
     }
 }
 
+fn apply_validity(
+    array: ArrayRef,
+    validity_array: Option<ArrayRef>,
+    nullability: Nullability,
+) -> VortexResult<ArrayRef> {
+    if matches!(nullability, Nullability::Nullable) {
+        let len = array.len();
+        array.mask(create_validity(validity_array, nullability).to_array(len))
+    } else {
+        Ok(array)
+    }
+}
+
 fn build_fixed_size_list(
     elements: ArrayRef,
     validity_array: Option<ArrayRef>,
     dtype: &DType,
     len: usize,
-    expr: &Expression,
 ) -> VortexResult<ArrayRef> {
     let DType::FixedSizeList(_, list_size, nullability) = dtype else {
         return Err(vortex_err!(
@@ -292,174 +384,12 @@ fn build_fixed_size_list(
         ));
     };
     let validity = create_validity(validity_array, *nullability);
-    FixedSizeListArray::try_new(elements, *list_size, validity, len)?
-        .into_array()
-        .apply(expr)
+    Ok(FixedSizeListArray::try_new(elements, *list_size, validity, len)?.into_array())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum ExprClass {
-    Validity,
-    Elements,
-}
-
-fn classify(expr: &Expression) -> ExprClass {
-    if (expr.is::<IsNull>() || expr.is::<IsNotNull>())
-        && expr.children().len() == 1
-        && is_root(expr.child(0))
-    {
-        return ExprClass::Validity;
-    }
-
-    if is_root(expr) {
-        return ExprClass::Elements;
-    }
-
-    expr.children()
-        .iter()
-        .map(classify)
-        .max()
-        .unwrap_or(ExprClass::Validity)
-}
-
-fn rewrite_validity_expr(expr: &Expression) -> VortexResult<Expression> {
-    if expr.is::<IsNotNull>() && expr.children().len() == 1 && is_root(expr.child(0)) {
-        return Ok(root());
-    }
-    if expr.is::<IsNull>() && expr.children().len() == 1 && is_root(expr.child(0)) {
-        return Ok(not(root()));
-    }
-    let children = expr
-        .children()
-        .iter()
-        .map(rewrite_validity_expr)
-        .collect::<VortexResult<Vec<_>>>()?;
-    expr.clone().with_children(children)
-}
-
-struct SparseElementPlan {
-    elements_range: Range<u64>,
-    element_mask: Mask,
-    kept_count: usize,
-}
-
-fn sparse_element_plan(
-    row_range: &Range<u64>,
-    mask: &Mask,
-    list_size: u64,
-) -> VortexResult<SparseElementPlan> {
-    let kept_count = mask.true_count();
-    if kept_count == 0 || list_size == 0 {
-        return Ok(SparseElementPlan {
-            elements_range: 0..0,
-            element_mask: Mask::new_true(0),
-            kept_count,
-        });
-    }
-
-    let first = mask
-        .first()
-        .ok_or_else(|| vortex_err!("sparse mask has no true values"))?;
-    let last = mask
-        .last()
-        .ok_or_else(|| vortex_err!("sparse mask has no true values"))?;
-    let first_row = row_range
-        .start
-        .checked_add(u64::try_from(first)?)
-        .ok_or_else(|| vortex_err!("fixed-size-list row range overflow"))?;
-    let last_row_exclusive = row_range
-        .start
-        .checked_add(u64::try_from(last + 1)?)
-        .ok_or_else(|| vortex_err!("fixed-size-list row range overflow"))?;
-    let elements_range = element_range(&(first_row..last_row_exclusive), list_size)?;
-    let element_mask_len = usize::try_from(elements_range.end - elements_range.start)?;
-
-    let list_size_usize = usize::try_from(list_size)?;
-    let mut element_slices = Vec::with_capacity(kept_count);
-    match mask.indices() {
-        AllOr::All => {
-            return Ok(SparseElementPlan {
-                elements_range,
-                element_mask: Mask::new_true(element_mask_len),
-                kept_count,
-            });
-        }
-        AllOr::None => {}
-        AllOr::Some(indices) => {
-            for &idx in indices {
-                let relative = idx - first;
-                let start = relative
-                    .checked_mul(list_size_usize)
-                    .ok_or_else(|| vortex_err!("fixed-size-list element mask overflow"))?;
-                element_slices.push((start, start + list_size_usize));
-            }
-        }
-    }
-
-    Ok(SparseElementPlan {
-        elements_range,
-        element_mask: Mask::from_slices(element_mask_len, element_slices),
-        kept_count,
-    })
-}
-
-struct ElementsProjection {
-    reader: FixedSizeListReader,
-    expr: Expression,
-    row_range: Range<u64>,
-}
-
-impl ElementsProjection {
-    async fn project_full_range(self) -> VortexResult<ArrayRef> {
-        let Self {
-            reader,
-            expr,
-            row_range,
-        } = self;
-        let len = usize::try_from(row_range.end - row_range.start)?;
-        let list_size = u64::from(reader.layout.list_size());
-        let elements_range = element_range(&row_range, list_size)?;
-        let elements_len = usize::try_from(elements_range.end - elements_range.start)?;
-        let elements_fut = reader.elements.projection_evaluation(
-            &elements_range,
-            &root(),
-            MaskFuture::new_true(elements_len),
-        )?;
-        let validity_fut = fetch_validity(
-            reader.validity.as_ref(),
-            &row_range,
-            MaskFuture::new_true(len),
-        )?;
-        let (elements, validity) = try_join!(elements_fut, validity_fut)?;
-        build_fixed_size_list(elements, validity, reader.layout.dtype(), len, &expr)
-    }
-
-    async fn project_sparse(self, mask: Mask) -> VortexResult<ArrayRef> {
-        let Self {
-            reader,
-            expr,
-            row_range,
-        } = self;
-        let plan = sparse_element_plan(&row_range, &mask, u64::from(reader.layout.list_size()))?;
-        let elements_fut = reader.elements.projection_evaluation(
-            &plan.elements_range,
-            &root(),
-            MaskFuture::ready(plan.element_mask),
-        )?;
-        let validity_fut = fetch_validity(
-            reader.validity.as_ref(),
-            &row_range,
-            MaskFuture::ready(mask),
-        )?;
-        let (elements, validity) = try_join!(elements_fut, validity_fut)?;
-        build_fixed_size_list(
-            elements,
-            validity,
-            reader.layout.dtype(),
-            plan.kept_count,
-            &expr,
-        )
-    }
+fn predicate_array_to_mask(array: ArrayRef, session: &VortexSession) -> VortexResult<Mask> {
+    let mut ctx = session.create_execution_ctx();
+    array.null_as_false().execute(&mut ctx)
 }
 
 #[cfg(test)]
@@ -470,13 +400,18 @@ mod tests {
     use vortex_array::arrays::FixedSizeListArray;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::assert_arrays_eq;
+    use vortex_array::dtype::FieldPath;
+    use vortex_array::expr::gt;
     use vortex_array::expr::is_not_null;
     use vortex_array::expr::is_null;
+    use vortex_array::expr::list_length;
+    use vortex_array::expr::lit;
     use vortex_array::validity::Validity;
 
     use super::*;
     use crate::LayoutStrategy;
     use crate::layouts::fixed_size_list::writer::FixedSizeListLayoutStrategy;
+    use crate::scan::split_by::SplitBy;
     use crate::segments::SegmentSource;
     use crate::segments::TestSegments;
     use crate::sequence::SequenceId;
@@ -589,6 +524,23 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn layout_splits_are_list_row_coordinates() -> VortexResult<()> {
+        let fsl = create_fsl(true);
+        let ctx = LayoutReaderContext::new();
+        let (segments, layout) = write_layout(fsl).await?;
+        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+
+        let splits = SplitBy::Layout.splits(
+            reader.as_ref(),
+            &(0..4),
+            &[FieldMask::Exact(FieldPath::root())],
+        )?;
+
+        assert_eq!(splits, vec![0, 4]);
+        Ok(())
+    }
+
     #[rstest]
     #[case::nullable(true, vec![true, false, true, true])]
     #[case::non_nullable(false, vec![true, true, true, true])]
@@ -616,6 +568,62 @@ mod tests {
             BoolArray::from_iter(valid.iter().map(|v| !v).collect::<Vec<_>>()),
             &mut exec_ctx
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn projection_list_length_preserves_validity() -> VortexResult<()> {
+        let fsl = create_fsl(true);
+        let ctx = LayoutReaderContext::new();
+        let (segments, layout) = write_layout(fsl).await?;
+        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+
+        let result = reader
+            .projection_evaluation(&(0..4), &list_length(root()), MaskFuture::new_true(4))?
+            .await?;
+
+        let expected =
+            PrimitiveArray::from_option_iter::<u64, _>([Some(2), None, Some(2), Some(2)])
+                .into_array();
+        let mut exec_ctx = SESSION.create_execution_ctx();
+        assert_arrays_eq!(result, expected, &mut exec_ctx);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn projection_list_length_applies_sparse_mask() -> VortexResult<()> {
+        let fsl = create_fsl(true);
+        let ctx = LayoutReaderContext::new();
+        let (segments, layout) = write_layout(fsl).await?;
+        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+        let mask = Mask::from_iter([false, true, false, true]);
+
+        let result = reader
+            .projection_evaluation(&(0..4), &list_length(root()), MaskFuture::ready(mask))?
+            .await?;
+
+        let expected = PrimitiveArray::from_option_iter::<u64, _>([None, Some(2)]).into_array();
+        let mut exec_ctx = SESSION.create_execution_ctx();
+        assert_arrays_eq!(result, expected, &mut exec_ctx);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filter_evaluation_list_length() -> VortexResult<()> {
+        let fsl = create_fsl(true);
+        let ctx = LayoutReaderContext::new();
+        let (segments, layout) = write_layout(fsl).await?;
+        let reader = layout.new_reader("".into(), segments, &SESSION, &ctx)?;
+
+        let result = reader
+            .filter_evaluation(
+                &(0..4),
+                &gt(list_length(root()), lit(1u64)),
+                MaskFuture::new_true(4),
+            )?
+            .await?;
+
+        assert_eq!(result, Mask::from_iter([true, false, true, true]));
         Ok(())
     }
 }

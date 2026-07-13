@@ -49,8 +49,6 @@ use vortex_layout::layouts::collect::CollectStrategy;
 use vortex_layout::layouts::compressed::CompressingStrategy;
 use vortex_layout::layouts::compressed::CompressorPlugin;
 use vortex_layout::layouts::dict::writer::DictStrategy;
-#[cfg(feature = "unstable_encodings")]
-use vortex_layout::layouts::fixed_size_list::writer::FixedSizeListLayoutStrategy;
 use vortex_layout::layouts::flat::writer::FlatLayoutStrategy;
 use vortex_layout::layouts::repartition::RepartitionStrategy;
 use vortex_layout::layouts::repartition::RepartitionWriterOptions;
@@ -159,7 +157,7 @@ pub struct WriteStrategyBuilder {
     field_writers: HashMap<FieldPath, Arc<dyn LayoutStrategy>>,
     allow_encodings: Option<HashSet<ArrayId>>,
     flat_strategy: Option<Arc<dyn LayoutStrategy>>,
-    /// Whether to write list fields using [`ListLayoutStrategy`].
+    /// Whether to write list-like fields using structural list layouts.
     ///
     /// [`ListLayoutStrategy`]: vortex_layout::layouts::list::writer::ListLayoutStrategy
     use_list_layout: bool,
@@ -190,7 +188,7 @@ impl WriteStrategyBuilder {
         self
     }
 
-    /// Enable writing list fields with [`ListLayoutStrategy`].
+    /// Enable writing list and fixed-size-list fields with structural list layouts.
     ///
     /// [`ListLayoutStrategy`]: vortex_layout::layouts::list::writer::ListLayoutStrategy
     pub fn with_list_layout(mut self) -> Self {
@@ -258,18 +256,7 @@ impl WriteStrategyBuilder {
             Arc::new(FlatLayoutStrategy::default())
         };
 
-        // 7. for each chunk create a leaf layout. Under the `unstable_encodings` feature,
-        // fixed-size-list chunks route through `FixedSizeListLayoutStrategy`, which stores
-        // elements and list validity as separately-addressable child layouts. Other chunks fall
-        // through to the flat strategy.
-        #[cfg(feature = "unstable_encodings")]
-        let leaf: Arc<dyn LayoutStrategy> = Arc::new(
-            FixedSizeListLayoutStrategy::default()
-                .with_elements(Arc::clone(&flat))
-                .with_validity(Arc::clone(&flat))
-                .with_fallback(Arc::clone(&flat)),
-        );
-        #[cfg(not(feature = "unstable_encodings"))]
+        // 7. for each chunk create a leaf layout.
         let leaf: Arc<dyn LayoutStrategy> = Arc::clone(&flat);
         let chunked = ChunkedLayoutStrategy::new(leaf);
         // 6. buffer chunks so they end up with closer segment ids physically

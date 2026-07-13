@@ -4,10 +4,11 @@
 //! A configurable writer strategy for tabular data.
 //!
 //! [`TableStrategy`] is a *dispatcher*: it inspects the dtype of the stream it is handed and
-//! routes struct columns to [`StructStrategy`], list columns to [`ListLayoutStrategy`], and
-//! everything else to the configured leaf strategy. Because it hands *itself* (suitably descended)
-//! to those structural writers as the strategy for their children, arbitrarily nested struct/list
-//! trees are written with no manual wiring.
+//! routes struct columns to [`StructStrategy`], list columns to [`ListLayoutStrategy`],
+//! fixed-size-list columns to [`FixedSizeListLayoutStrategy`], and everything else to the
+//! configured leaf strategy. Because it hands *itself* (suitably descended) to those structural
+//! writers as the strategy for their children, arbitrarily nested struct/list trees are written
+//! with no manual wiring.
 //!
 //! The dispatcher also owns field-path overrides, letting callers force a specific leaf field —
 //! at any depth — onto a custom strategy.
@@ -28,16 +29,17 @@ use vortex_utils::aliases::hash_set::HashSet;
 
 use crate::LayoutRef;
 use crate::LayoutStrategy;
+use crate::layouts::fixed_size_list::writer::FixedSizeListLayoutStrategy;
 use crate::layouts::list::writer::ListLayoutStrategy;
 use crate::layouts::struct_::StructStrategy;
 use crate::segments::SegmentSinkRef;
 use crate::sequence::SendableSequentialStream;
 use crate::sequence::SequencePointer;
 
-/// Whether [`TableStrategy`] writes list fields using a [`ListLayoutStrategy`] by
-/// default. Disabled unless the environment variable `VORTEX_EXPERIMENTAL_LIST_LAYOUT`
-/// is set to `1`.
+/// Whether [`TableStrategy`] writes list-like fields using structural list layouts by default.
+/// Disabled unless the environment variable `VORTEX_EXPERIMENTAL_LIST_LAYOUT` is set to `1`.
 ///
+/// [`FixedSizeListLayoutStrategy`]: crate::layouts::fixed_size_list::writer::FixedSizeListLayoutStrategy
 /// [`ListLayoutStrategy`]: crate::layouts::list::writer::ListLayoutStrategy
 pub fn use_experimental_list_layout() -> bool {
     static USE_EXPERIMENTAL_LIST_LAYOUT: LazyLock<bool> =
@@ -56,6 +58,9 @@ pub fn use_experimental_list_layout() -> bool {
 ///   strategies. Gated: only when list decomposition is enabled via
 ///   [`with_list_layout`][Self::with_list_layout] (off by default); otherwise a list falls through
 ///   to the leaf strategy.
+/// - **fixed-size-list** → [`FixedSizeListLayoutStrategy`], with `elements` written by a
+///   descended copy of this dispatcher and `validity` by the validity strategy. Gated by the same
+///   [`with_list_layout`][Self::with_list_layout] switch as list.
 /// - **anything else** → the leaf strategy.
 ///
 /// [`write_stream`]: LayoutStrategy::write_stream
@@ -67,8 +72,9 @@ pub struct TableStrategy {
     validity: Arc<dyn LayoutStrategy>,
     /// The writer for leaf fields, i.e. anything that is not a struct.
     leaf: Arc<dyn LayoutStrategy>,
-    /// Whether to write list fields using [`ListLayoutStrategy`].
+    /// Whether to write list-like fields using structural list layouts.
     ///
+    /// [`FixedSizeListLayoutStrategy`]: crate::layouts::fixed_size_list::writer::FixedSizeListLayoutStrategy
     /// [`ListLayoutStrategy`]: crate::layouts::list::writer::ListLayoutStrategy
     use_list_layout: bool,
 }
@@ -165,7 +171,7 @@ impl TableStrategy {
         self
     }
 
-    /// Enable writing list fields with [`ListLayoutStrategy`].
+    /// Enable writing list and fixed-size-list fields with structural list layouts.
     pub fn with_list_layout(mut self) -> Self {
         self.use_list_layout = true;
         self
@@ -214,6 +220,18 @@ impl TableStrategy {
         ListLayoutStrategy::default()
             .with_elements(Arc::new(self.descend_clean()))
             .with_offsets(Arc::clone(&self.leaf))
+            .with_validity(Arc::clone(&self.validity))
+            .with_fallback(Arc::clone(&self.leaf))
+    }
+
+    /// Build the [`FixedSizeListLayoutStrategy`] used to write a fixed-size-list field stream at
+    /// this level.
+    ///
+    /// The `elements` sub-column is routed back through a clean descended dispatcher so nested
+    /// structs/lists/fixed-size-lists recurse; `validity` uses the shared validity strategy.
+    fn fixed_size_list_strategy(&self) -> FixedSizeListLayoutStrategy {
+        FixedSizeListLayoutStrategy::default()
+            .with_elements(Arc::new(self.descend_clean()))
             .with_validity(Arc::clone(&self.validity))
             .with_fallback(Arc::clone(&self.leaf))
     }
@@ -297,6 +315,13 @@ impl LayoutStrategy for TableStrategy {
                 .await;
         }
 
+        if dtype.is_fixed_size_list() && self.use_list_layout {
+            return self
+                .fixed_size_list_strategy()
+                .write_stream(ctx, segment_sink, stream, eof, session)
+                .await;
+        }
+
         // Leaf: hand off to the leaf strategy.
         self.leaf
             .write_stream(ctx, segment_sink, stream, eof, session)
@@ -312,8 +337,10 @@ mod tests {
     use vortex_array::ArrayContext;
     use vortex_array::ArrayRef;
     use vortex_array::IntoArray;
+    use vortex_array::array_session;
     use vortex_array::arrays::BoolArray;
     use vortex_array::arrays::ChunkedArray;
+    use vortex_array::arrays::FixedSizeListArray;
     use vortex_array::arrays::ListArray;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::arrays::StructArray;
@@ -327,7 +354,9 @@ mod tests {
     use vortex_buffer::buffer;
     use vortex_error::VortexResult;
     use vortex_io::runtime::single::block_on;
+    use vortex_io::session::RuntimeSession;
     use vortex_io::session::RuntimeSessionExt;
+    use vortex_session::VortexSession;
 
     use crate::LayoutRef;
     use crate::LayoutStrategy;
@@ -339,14 +368,22 @@ mod tests {
     use crate::sequence::SequentialArrayStreamExt;
     use crate::sequence::SequentialStreamAdapter;
     use crate::sequence::SequentialStreamExt;
-    use crate::test::SESSION;
+    use crate::session::LayoutSession;
+
+    fn layout_test_session() -> VortexSession {
+        array_session()
+            .with::<LayoutSession>()
+            .with::<RuntimeSession>()
+            .with_tokio()
+    }
 
     async fn write<S: LayoutStrategy>(strategy: &S, array: ArrayRef) -> VortexResult<LayoutRef> {
+        let session = layout_test_session();
         let segments = Arc::new(TestSegments::default());
         let (ptr, eof) = SequenceId::root().split();
         let stream = array.to_array_stream().sequenced(ptr);
         strategy
-            .write_stream(ArrayContext::empty(), segments, stream, eof, &SESSION)
+            .write_stream(ArrayContext::empty(), segments, stream, eof, &session)
             .await
     }
 
@@ -439,6 +476,79 @@ mod tests {
         Ok(())
     }
 
+    /// Fixed-size-list decomposition is gated by the same switch as list decomposition. Without
+    /// it, fixed-size-list columns fall through to the configured leaf strategy.
+    #[tokio::test]
+    async fn fixed_size_list_uses_leaf_without_list_layout() -> VortexResult<()> {
+        let fsl = FixedSizeListArray::new(
+            buffer![1i32, 2, 3, 4, 5, 6].into_array(),
+            2,
+            Validity::NonNullable,
+            3,
+        )
+        .into_array();
+
+        let layout = write(&flat_table(), fsl).await?;
+        insta::assert_snapshot!(layout.display_tree(), @"vortex.flat, dtype: fixed_size_list(i32)[2], segment: 0");
+        Ok(())
+    }
+
+    /// A `fixed_size_list<fixed_size_list<i32>>` column: the dispatcher recurses into itself so
+    /// the outer fixed-size-list's `elements` are decomposed as a nested fixed-size-list layout.
+    #[tokio::test]
+    async fn dispatches_nested_fixed_size_list() -> VortexResult<()> {
+        let inner = FixedSizeListArray::new(
+            buffer![1i32, 2, 3, 4, 5, 6, 7, 8].into_array(),
+            2,
+            Validity::NonNullable,
+            4,
+        )
+        .into_array();
+        let outer = FixedSizeListArray::new(inner, 2, Validity::NonNullable, 2).into_array();
+
+        let layout = write(&flat_table().with_list_layout(), outer).await?;
+        insta::assert_snapshot!(layout.display_tree(), @r"
+        vortex.fixed_size_list, dtype: fixed_size_list(fixed_size_list(i32)[2])[2], children: 1
+        └── elements: vortex.fixed_size_list, dtype: fixed_size_list(i32)[2], children: 1
+            └── elements: vortex.flat, dtype: i32, segment: 0
+        ");
+        Ok(())
+    }
+
+    /// A `struct<{ items: fixed_size_list<struct<{a,b}>>? }>` column: fixed-size-list
+    /// decomposition recurses into struct decomposition for the elements, and a nullable
+    /// fixed-size-list writes a validity child.
+    #[tokio::test]
+    async fn dispatches_struct_fixed_size_list_struct() -> VortexResult<()> {
+        let inner_struct = StructArray::from_fields(
+            [
+                ("a", buffer![1i32, 2, 3, 4, 5, 6].into_array()),
+                ("b", buffer![10i32, 20, 30, 40, 50, 60].into_array()),
+            ]
+            .as_slice(),
+        )?
+        .into_array();
+        let items = FixedSizeListArray::new(
+            inner_struct,
+            2,
+            Validity::Array(BoolArray::from_iter([true, false, true]).into_array()),
+            3,
+        )
+        .into_array();
+        let st = StructArray::from_fields([("items", items)].as_slice())?.into_array();
+
+        let layout = write(&flat_table().with_list_layout(), st).await?;
+        insta::assert_snapshot!(layout.display_tree(), @r"
+        vortex.struct, dtype: {items=fixed_size_list({a=i32, b=i32})[2]?}, children: 1
+        └── items: vortex.fixed_size_list, dtype: fixed_size_list({a=i32, b=i32})[2]?, children: 2
+            ├── elements: vortex.struct, dtype: {a=i32, b=i32}, children: 2
+            │   ├── a: vortex.flat, dtype: i32, segment: 1
+            │   └── b: vortex.flat, dtype: i32, segment: 2
+            └── validity: vortex.flat, dtype: bool, segment: 0
+        ");
+        Ok(())
+    }
+
     /// A multi-chunk `list<i32>` written with a chunked leaf: each sub-column (`elements`,
     /// `offsets`) becomes its own `ChunkedLayout`, so elements are chunked independently of rows.
     /// This is the "list-of-chunkeds" topology top-level decomposition unlocks.
@@ -474,6 +584,39 @@ mod tests {
         └── offsets: vortex.chunked, dtype: u64, children: 2
             ├── [0]: vortex.flat, dtype: u64, segment: 2
             └── [1]: vortex.flat, dtype: u64, segment: 3
+        ");
+        Ok(())
+    }
+
+    /// A multi-chunk `fixed_size_list<i32>` written with a chunked leaf becomes a single
+    /// fixed-size-list layout whose elements child is independently chunked.
+    #[tokio::test]
+    async fn dispatches_chunked_fixed_size_list() -> VortexResult<()> {
+        let chunk0 = FixedSizeListArray::new(
+            buffer![1i32, 2, 3, 4].into_array(),
+            2,
+            Validity::NonNullable,
+            2,
+        )
+        .into_array();
+        let chunk1 =
+            FixedSizeListArray::new(buffer![5i32, 6].into_array(), 2, Validity::NonNullable, 1)
+                .into_array();
+        let dtype = chunk0.dtype().clone();
+        let chunked = ChunkedArray::try_new(vec![chunk0, chunk1], dtype)?.into_array();
+
+        let flat: Arc<dyn LayoutStrategy> = Arc::new(FlatLayoutStrategy::default());
+        let dispatcher = TableStrategy::new(
+            Arc::clone(&flat),
+            Arc::new(ChunkedLayoutStrategy::new(FlatLayoutStrategy::default())),
+        )
+        .with_list_layout();
+        let layout = write(&dispatcher, chunked).await?;
+        insta::assert_snapshot!(layout.display_tree(), @r"
+        vortex.fixed_size_list, dtype: fixed_size_list(i32)[2], children: 1
+        └── elements: vortex.chunked, dtype: i32, children: 2
+            ├── [0]: vortex.flat, dtype: i32, segment: 0
+            └── [1]: vortex.flat, dtype: i32, segment: 1
         ");
         Ok(())
     }
@@ -604,7 +747,7 @@ mod tests {
         );
 
         block_on(|handle| async move {
-            let session = SESSION.clone().with_handle(handle);
+            let session = layout_test_session().with_handle(handle);
             strategy
                 .write_stream(
                     ctx,

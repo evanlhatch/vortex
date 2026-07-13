@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+mod expr;
 mod reader;
 pub mod writer;
 
@@ -18,6 +19,7 @@ use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 use vortex_error::vortex_panic;
 use vortex_session::VortexSession;
+use vortex_session::registry::CachedId;
 
 use crate::LayoutBuildContext;
 use crate::LayoutChildType;
@@ -45,7 +47,8 @@ impl VTable for FixedSizeList {
     type Metadata = EmptyMetadata;
 
     fn id(_encoding: &Self::Encoding) -> LayoutId {
-        LayoutId::new("vortex.fixed_size_list")
+        static ID: CachedId = CachedId::new("vortex.fixed_size_list");
+        *ID
     }
 
     fn encoding(_layout: &Self::Layout) -> LayoutEncodingRef {
