@@ -33,7 +33,6 @@ use crate::LayoutReaderContext;
 use crate::LayoutReaderRef;
 use crate::RowSplits;
 use crate::SplitRange;
-use crate::layouts::chunked::reader::ChunkedReader;
 use crate::layouts::list::ListLayout;
 use crate::layouts::list::expr::ListChildrenNeeded;
 use crate::layouts::list::expr::get_necessary_list_children;
@@ -141,9 +140,9 @@ impl ListReader {
     /// Projection for [`ListChildrenNeeded::All`] expressions. Materializes the list and applies
     /// the expression.
     ///
-    /// Dispatches between a bounded read (a strict sub-range over chunked elements, fetching only
-    /// the element-chunks the range overlaps) and a whole-chunk read (full range, or a single flat
-    /// elements segment where there is nothing to skip).
+    /// Dispatches between a bounded read for a strict sub-range and a concurrent read for the full
+    /// column. The bounded read is valid for any elements layout and allows transparent wrappers,
+    /// such as zoned or structural layouts, to push the range down to their children.
     fn project_all(
         &self,
         row_range: &Range<u64>,
@@ -151,29 +150,18 @@ impl ListReader {
         mask: MaskFuture,
     ) -> VortexResult<ArrayFuture> {
         let is_full_range = row_range.start == 0 && row_range.end == self.layout.row_count();
-        if is_full_range || !self.elements_are_chunked() {
-            self.project_all_concurrent(row_range, expr, mask)
+        if is_full_range {
+            self.project_all_concurrent(expr, mask)
         } else {
             self.project_all_elements_bounded(row_range, expr, mask)
         }
     }
 
-    /// Whether the `elements` child is a chunked layout, so a bounded read can skip the element
-    /// chunks a row range does not overlap. For a single flat elements segment there is nothing to
-    /// skip, so the whole-chunk read (which avoids the offsets→elements round-trip) is preferred.
-    fn elements_are_chunked(&self) -> bool {
-        self.elements
-            .as_any()
-            .downcast_ref::<ChunkedReader>()
-            .is_some()
-    }
-
-    /// Whole-chunk read: fetches the entire `elements`, `offsets`, and `validity` children
+    /// Full-column read: fetches the entire `elements`, `offsets`, and `validity` children
     /// concurrently — no offsets→elements round-trip, since the elements bound is the whole buffer.
-    /// The materialized list is sliced to `row_range` and filtered by the caller mask.
+    /// The materialized list is filtered by the caller mask.
     fn project_all_concurrent(
         &self,
-        row_range: &Range<u64>,
         expr: &Expression,
         mask: MaskFuture,
     ) -> VortexResult<ArrayFuture> {
@@ -181,7 +169,6 @@ impl ListReader {
         let elements_row_count = self.elements.row_count();
         let nullability = self.layout.dtype().nullability();
         let expr = expr.clone();
-        let row_range = row_range.clone();
 
         // Fire all three child reads up front so they run concurrently and overlap the mask await.
         let offsets_fut = self.fetch_raw_offsets(&(0..row_count))?;
@@ -198,13 +185,6 @@ impl ListReader {
                 ListArray::try_new(elements, offsets, create_validity(validity, nullability))?
                     .into_array();
 
-            // Slice the whole-chunk list down to the requested row range.
-            let list = if row_range.start == 0 && row_range.end == row_count {
-                list
-            } else {
-                list.slice(usize::try_from(row_range.start)?..usize::try_from(row_range.end)?)?
-            };
-
             // Filter before applying the expression: the expression may depend on the filtered
             // rows being removed (e.g. `cast(a, u8) where a < 256`).
             let mask = mask.await?;
@@ -218,10 +198,10 @@ impl ListReader {
         .boxed())
     }
 
-    /// Bounded read for a strict sub-range over chunked elements. Reads `offsets[row_range]`,
-    /// decodes the first and last offset to bound the elements read to `[first..last)`, then
-    /// rebases the offsets to index into that sliced buffer. With chunked elements this fetches
-    /// only the element-chunks the range overlaps, at the cost of one offsets→elements round-trip.
+    /// Bounded read for a strict sub-range. Reads `offsets[row_range]`, decodes the first and last
+    /// offset to bound the elements read to `[first..last)`, then rebases the offsets to index into
+    /// that sliced buffer. Range-aware elements layouts can skip non-overlapping segments at the
+    /// cost of one offsets→elements round-trip.
     fn project_all_elements_bounded(
         &self,
         row_range: &Range<u64>,
@@ -253,7 +233,7 @@ impl ListReader {
                 ListArray::try_new(elements, offsets, create_validity(validity, nullability))?
                     .into_array();
 
-            // Filter before applying the expression (see `project_elements_whole_chunk`).
+            // Filter before applying the expression (see `project_all_concurrent`).
             let mask = mask.await?;
             let list = if mask.all_true() {
                 list
@@ -920,10 +900,11 @@ mod tests {
         Ok(())
     }
 
-    /// A partial (sub-chunk) row range still returns exactly that range: the whole chunk is read,
-    /// then sliced.
+    /// A partial range against a single flat elements segment takes the bounded path. The flat
+    /// reader may still fetch its whole segment, but the list reader reconstructs only the requested
+    /// element range.
     #[tokio::test]
-    async fn projection_evaluation_partial_range_slices_whole_chunk() -> VortexResult<()> {
+    async fn projection_evaluation_partial_range_bounded() -> VortexResult<()> {
         let list = create_wider_list_array(false);
         let ctx = LayoutReaderContext::new();
         let (segments, layout, session) = write_layout(&flat_list_strategy(), list.clone()).await?;
