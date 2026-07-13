@@ -181,9 +181,12 @@ impl ListReader {
 
         Ok(async move {
             let (offsets, elements, validity) = try_join!(offsets_fut, elements_fut, validity_fut)?;
-            let list =
-                ListArray::try_new(elements, offsets, create_validity(validity, nullability))?
-                    .into_array();
+            // SAFETY: ListLayout is constructed from a valid ListArray and reading its children
+            // without transformation preserves the list invariants.
+            let list = unsafe {
+                ListArray::new_unchecked(elements, offsets, create_validity(validity, nullability))
+            }
+            .into_array();
 
             // Filter before applying the expression: the expression may depend on the filtered
             // rows being removed (e.g. `cast(a, u8) where a < 256`).
@@ -229,9 +232,13 @@ impl ListReader {
 
             // Rebase the offsets to index into the sliced elements buffer.
             let offsets = rebase_offsets(offsets, elements_range.start)?;
-            let list =
-                ListArray::try_new(elements, offsets, create_validity(validity, nullability))?
-                    .into_array();
+            // SAFETY: the ListLayout children were written from a valid ListArray. Slicing the
+            // elements to the first and last offsets and rebasing every offset by the first one
+            // preserves the list invariants.
+            let list = unsafe {
+                ListArray::new_unchecked(elements, offsets, create_validity(validity, nullability))
+            }
+            .into_array();
 
             // Filter before applying the expression (see `project_all_concurrent`).
             let mask = mask.await?;
@@ -349,7 +356,7 @@ impl LayoutReader for ListReader {
         Ok(())
     }
 
-    //TODO(mk): handle zones for lists
+    // TODO(mk): handle zones for lists
     fn pruning_evaluation(
         &self,
         _row_range: &Range<u64>,
