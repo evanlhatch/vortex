@@ -181,10 +181,7 @@ impl RepeatedScan {
         })
     }
 
-    pub(crate) fn execute(
-        &self,
-        row_range: Option<Range<u64>>,
-    ) -> VortexResult<Vec<TaskFuture>> {
+    pub(crate) fn execute(&self, row_range: Option<Range<u64>>) -> VortexResult<Vec<TaskFuture>> {
         let ctx = self.task_context();
 
         let mut limit = self.limit.filter(|_| self.filter.is_none());
