@@ -19,7 +19,7 @@ use vortex_scan::row_mask::RowMask;
 use crate::LayoutReader;
 use crate::scan::filter::FilterExpr;
 
-pub type TaskFuture<T> = BoxFuture<'static, VortexResult<T>>;
+pub type TaskFuture = BoxFuture<'static, VortexResult<Option<ArrayRef>>>;
 
 /// Logic for executing a single split reading task.
 /// N.B. read_mask should be evaluated against all_false() before calling this
@@ -33,12 +33,13 @@ pub type TaskFuture<T> = BoxFuture<'static, VortexResult<T>>;
 /// The intersected row range is then further reduced via expression-based pruning. After pruning
 /// has eliminated more blocks, the full filter is executed over the remainder of the split.
 ///
-/// This mask is then provided to the reader to perform a filtered projection over the split data.
+/// This mask is then provided to the reader to perform a filtered projection over the split data,
+/// yielding the projected array (or `None` when the split selects no rows).
 pub fn split_exec(
     ctx: Arc<TaskContext>,
     read_mask: RowMask,
     limit: Option<&mut u64>,
-) -> VortexResult<TaskFuture<Option<ArrayRef>>> {
+) -> VortexResult<TaskFuture> {
     let row_range = read_mask.row_range();
     let row_mask = read_mask.mask().clone();
 
