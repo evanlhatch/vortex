@@ -50,6 +50,7 @@ use vortex_layout::layouts::compressed::CompressingStrategy;
 use vortex_layout::layouts::compressed::CompressorPlugin;
 use vortex_layout::layouts::dict::writer::DictStrategy;
 use vortex_layout::layouts::flat::writer::FlatLayoutStrategy;
+use vortex_layout::layouts::list::writer::ListLayoutStrategy;
 use vortex_layout::layouts::repartition::RepartitionStrategy;
 use vortex_layout::layouts::repartition::RepartitionWriterOptions;
 use vortex_layout::layouts::table::TableStrategy;
@@ -322,12 +323,14 @@ impl WriteStrategyBuilder {
             probe_compressor,
         );
 
+        let row_block_size = NonZeroUsize::new(self.row_block_size).vortex_expect("must be non 0");
+
         // 2. calculate stats for each row group
         let stats = ZonedStrategy::new(
             dict,
             compress_then_flat.clone(),
             ZonedLayoutOptions {
-                block_size: NonZeroUsize::new(self.row_block_size).vortex_expect("must be non 0"),
+                block_size: row_block_size,
                 ..Default::default()
             },
         );
@@ -346,7 +349,7 @@ impl WriteStrategyBuilder {
         );
 
         // 0. start with splitting columns
-        let validity_strategy = CollectStrategy::new(compress_then_flat);
+        let validity_strategy = CollectStrategy::new(compress_then_flat.clone());
 
         // Take any field overrides from the builder and apply them to the final strategy.
         let mut table_strategy =
@@ -354,7 +357,28 @@ impl WriteStrategyBuilder {
                 .with_field_writers(self.field_writers);
 
         if self.use_list_layout {
-            table_strategy = table_strategy.with_list_layout();
+            // We need a closure here to enable recursive application of list layout.
+            table_strategy = table_strategy.with_list_layout_factory(
+                move |list_layout: ListLayoutStrategy| -> Arc<dyn LayoutStrategy> {
+                    let zoned = ZonedStrategy::new(
+                        list_layout,
+                        compress_then_flat.clone(),
+                        ZonedLayoutOptions {
+                            block_size: row_block_size,
+                            ..Default::default()
+                        },
+                    );
+                    Arc::new(RepartitionStrategy::new(
+                        zoned,
+                        RepartitionWriterOptions {
+                            block_size_minimum: 0,
+                            block_len_multiple: row_block_size.get(),
+                            block_size_target: None,
+                            canonicalize: false,
+                        },
+                    ))
+                },
+            );
         }
 
         Arc::new(table_strategy)
