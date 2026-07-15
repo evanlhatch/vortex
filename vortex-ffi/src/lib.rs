@@ -17,10 +17,10 @@ mod ptype;
 mod scalar;
 mod scan;
 mod session;
-mod sink;
 mod string;
 mod struct_array;
 mod struct_fields;
+mod writer;
 
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -38,14 +38,14 @@ pub use session::vx_session;
 pub use session::vx_session_free;
 pub use session::vx_session_new_with;
 pub use session::vx_session_ref;
-pub use sink::vx_array_sink;
-pub use sink::vx_array_sink_open_file_with_strategy;
 pub use string::vx_view;
 use vortex::dtype::FieldName;
 use vortex::error::VortexResult;
 use vortex::error::vortex_ensure;
 use vortex::io::runtime::current::CurrentThreadRuntime;
 use vortex::io::runtime::current::CurrentThreadWorkerPool;
+pub use writer::vx_writer;
+pub use writer::vx_writer_open_with_strategy;
 
 #[cfg(all(feature = "mimalloc", not(miri)))]
 #[global_allocator]
@@ -135,12 +135,13 @@ mod tests {
     use crate::error::vx_error_free;
     use crate::error::vx_error_message;
     use crate::session::vx_session;
-    use crate::sink::vx_array_sink_close;
-    use crate::sink::vx_array_sink_open_file;
-    use crate::sink::vx_array_sink_push;
     use crate::string::vx_view;
     use crate::vx_runtime_set_worker_threads;
     use crate::vx_runtime_worker_count;
+    use crate::writer::vx_writer_close;
+    use crate::writer::vx_writer_free;
+    use crate::writer::vx_writer_open;
+    use crate::writer::vx_writer_push;
 
     #[test]
     #[cfg_attr(miri, ignore)]
@@ -211,10 +212,11 @@ mod tests {
         unsafe {
             let vx_dtype_ptr = vx_dtype::new(Arc::new(dtype.clone()));
             let mut error = ptr::null_mut();
-            let sink = vx_array_sink_open_file(session, path, vx_dtype_ptr, &raw mut error);
+            let sink = vx_writer_open(session, path, vx_dtype_ptr, 32, &raw mut error);
             let array = vx_array::new(Arc::new(struct_array.clone().into_array()));
-            vx_array_sink_push(sink, array, &raw mut error);
-            vx_array_sink_close(sink, &raw mut error);
+            vx_writer_push(sink, array, &raw mut error);
+            vx_writer_close(sink, &raw mut error);
+            vx_writer_free(sink);
             vx_array_free(array);
             vx_dtype_free(vx_dtype_ptr);
         }

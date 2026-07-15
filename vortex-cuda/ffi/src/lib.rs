@@ -34,8 +34,8 @@ use vortex_ffi::ffi_runtime;
 use vortex_ffi::try_or;
 use vortex_ffi::vx_array;
 use vortex_ffi::vx_array_ref;
-use vortex_ffi::vx_array_sink;
-use vortex_ffi::vx_array_sink_open_file_with_strategy;
+use vortex_ffi::vx_writer;
+use vortex_ffi::vx_writer_open_with_strategy;
 use vortex_ffi::vx_dtype;
 use vortex_ffi::vx_error;
 use vortex_ffi::vx_partition;
@@ -80,31 +80,31 @@ pub unsafe extern "C-unwind" fn vx_cuda_session_new(
     })
 }
 
-/// Open a Vortex file sink configured to produce CUDA-readable files.
+/// Open a Vortex file writer configured to produce CUDA-readable files.
 ///
-/// Push host-resident arrays and close or abort the returned sink with the standard
-/// `vx_array_sink_*` functions. This function configures the on-disk encodings and layout; it does
+/// Push host-resident arrays and close the returned writer with the standard
+/// `vx_writer_*` functions. This function configures the on-disk encodings and layout; it does
 /// not move arrays to the GPU during the write.
 ///
 /// # Safety
 ///
 /// `session`, `path`, and `dtype` must satisfy the same requirements as
-/// `vx_array_sink_open_file`. If `error_out` is non-null, it must be valid for writing one error
+/// `vx_writer_open`. If `error_out` is non-null, it must be valid for writing one error
 /// pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn vx_cuda_array_sink_open_file(
+pub unsafe extern "C-unwind" fn vx_cuda_writer_open(
     session: *const vx_session,
     path: vx_view,
     dtype: *const vx_dtype,
     error_out: *mut *mut vx_error,
-) -> *mut vx_array_sink {
+) -> *mut vx_writer {
     try_or(error_out, ptr::null_mut(), || {
         session_with_cuda(unsafe { vx_session_ref(session) }?)?;
         let strategy = WriteStrategyBuilder::default()
             .with_btrblocks_builder(BtrBlocksCompressorBuilder::default().only_cuda_compatible())
             .with_flat_strategy(Arc::new(CudaFlatLayoutStrategy::default()))
             .build();
-        unsafe { vx_array_sink_open_file_with_strategy(session, path, dtype, strategy) }
+        unsafe { vx_writer_open_with_strategy(session, path, dtype, strategy) }
     })
 }
 
@@ -114,7 +114,7 @@ pub unsafe extern "C-unwind" fn vx_cuda_array_sink_open_file(
 /// buffers and transferred directly to the GPU.
 ///
 /// The file must use encodings and layouts supported by the CUDA execution path, such as files
-/// written by [`vx_cuda_array_sink_open_file`]. Pinned staging buffers are reused across scans made
+/// written by [`vx_cuda_writer_open`]. Pinned staging buffers are reused across scans made
 /// with the same CUDA session.
 ///
 /// On success returns `0` and writes an owned [`ArrowDeviceArrayStream`] to `out_stream`. The
