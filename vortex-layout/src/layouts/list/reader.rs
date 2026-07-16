@@ -47,6 +47,9 @@ type OptionalArrayFuture = BoxFuture<'static, VortexResult<Option<ArrayRef>>>;
 /// and above which we evaluate the expression over all rows and intersect afterward.
 const EXPR_EVAL_THRESHOLD: f64 = 0.2;
 
+/// Maximum number of outer-row scan ranges contributed by one list layout.
+const MAX_LIST_SPLIT_COUNT: u64 = 64;
+
 /// Reader for [`ListLayout`].
 #[derive(Clone)]
 pub struct ListReader {
@@ -138,8 +141,7 @@ impl ListReader {
         .boxed())
     }
 
-    /// Projection for [`ListChildrenNeeded::All`] expressions. Materializes the list and applies
-    /// the expression.
+    /// Projection for [`ListChildrenNeeded::All`] expressions.
     ///
     /// An all-true mask over the full local range reads every child concurrently. Otherwise, the
     /// read is bounded to the first and last selected list.
@@ -192,9 +194,11 @@ impl ListReader {
         .boxed())
     }
 
-    /// Bounded read for a sub-range or selective mask. Crops leading and trailing unselected lists,
-    /// reads the element range they cover, and delegates any interior filtering to the reconstructed
-    /// list array.
+    /// Bounded read for a sub-range or selective mask.
+    ///
+    /// Crops leading and trailing unselected lists, reads their offsets, and translates the first
+    /// and last offset into the element-row range to fetch. Any holes in the selection are filtered
+    /// after reconstructing the list array.
     fn project_all_bounded(
         &self,
         row_range: &Range<u64>,
@@ -343,19 +347,63 @@ impl LayoutReader for ListReader {
 
     fn register_splits(
         &self,
-        field_mask: &[FieldMask],
+        _field_mask: &[FieldMask],
         split_range: &SplitRange,
         splits: &mut RowSplits,
     ) -> VortexResult<()> {
-        self.offsets
-            .register_splits(field_mask, split_range, splits)?;
-        if let Some(validity) = &self.validity {
-            validity.register_splits(field_mask, split_range, splits)?;
+        split_range.check_bounds(self.layout.row_count())?;
+
+        // Splits are difficult to calculate because all children live in different row coordinate spaces.
+        // List elements typically comprise the majority of the data in a list, and validity/offsets can be treated
+        // as metadata. We therefore want to parallelize the scan based on element work.
+        //
+        // Scan splits must be expressed in the list layout's outer-row space, but the elements child
+        // reports its natural boundaries in element-row space. So we translate the element splits using a
+        // heuristic to outer-row space.
+
+        let element_row_count = self.elements.row_count();
+        if element_row_count != 0 {
+            let mut element_splits = RowSplits::new_capacity(128);
+            self.elements.register_splits(
+                &[FieldMask::All],
+                &SplitRange::root(0..element_row_count)?,
+                &mut element_splits,
+            )?;
+
+            let row_range = split_range.row_range();
+            let mut last_split = None;
+            for element_split in element_splits.into_sorted_deduped() {
+                let Some(split) = map_element_split_to_outer_grid(
+                    element_split,
+                    element_row_count,
+                    self.layout.row_count(),
+                    MAX_LIST_SPLIT_COUNT,
+                ) else {
+                    continue;
+                };
+                if split <= row_range.start {
+                    continue;
+                }
+                if split >= row_range.end {
+                    break;
+                }
+                if last_split == Some(split) {
+                    continue;
+                }
+                splits.push(
+                    split_range
+                        .row_offset()
+                        .checked_add(split)
+                        .vortex_expect("List layout split offset overflow"),
+                );
+                last_split = Some(split);
+            }
         }
+        splits.push(split_range.root_row_range().end);
         Ok(())
     }
 
-    // TODO(mk): handle zones for lists
+    // TODO(mk): handle zones for list elements
     fn pruning_evaluation(
         &self,
         _row_range: &Range<u64>,
@@ -400,6 +448,10 @@ impl LayoutReader for ListReader {
         }))
     }
 
+    /// Reads only the list children needed to evaluate `expr`.
+    ///
+    /// Validity-only expressions avoid offsets and elements, length expressions read offsets and
+    /// validity, and general expressions reconstruct a list from all applicable children.
     fn projection_evaluation(
         &self,
         row_range: &Range<u64>,
@@ -415,6 +467,52 @@ impl LayoutReader for ListReader {
             ListChildrenNeeded::All => self.project_all(row_range, expr, mask),
         }
     }
+}
+
+/// Converts a natural boundary from element-row space into an approximate outer-row scan split.
+///
+/// Scan splits must be expressed in the list layout's outer-row space, but the elements child
+/// reports its natural boundaries in element-row space. Translating a boundary exactly would
+/// require consulting the list offsets, so this function instead preserves its relative position:
+///
+/// ```text
+/// element_split / element_row_count ≈ outer_split / outer_row_count
+/// ```
+///
+/// The relative position is first rounded onto a grid containing at most `max_split_count` scan
+/// ranges, then mapped into outer-row space. Multiple element boundaries may therefore map to the
+/// same outer split and are deduplicated by the caller. With a grid size of 64, at most 63 interior
+/// splits—and therefore 64 scan ranges—can be produced.
+///
+/// The result is only a task-sizing hint. It is always between outer rows, but it is not guaranteed
+/// to correspond exactly to the original physical element boundary. Endpoint boundaries are
+/// omitted because they do not subdivide the scan
+fn map_element_split_to_outer_grid(
+    element_split: u64,
+    element_row_count: u64,
+    outer_row_count: u64,
+    max_split_count: u64,
+) -> Option<u64> {
+    if element_split == 0
+        || element_split >= element_row_count
+        || outer_row_count == 0
+        || max_split_count < 2
+    {
+        return None;
+    }
+    debug_assert!(max_split_count.is_power_of_two());
+
+    let grid_index = (u128::from(element_split) * u128::from(max_split_count)
+        + u128::from(element_row_count / 2))
+        / u128::from(element_row_count);
+    if grid_index == 0 || grid_index >= u128::from(max_split_count) {
+        return None;
+    }
+
+    let outer_split = grid_index * u128::from(outer_row_count) / u128::from(max_split_count);
+    let outer_split = u64::try_from(outer_split)
+        .vortex_expect("Outer split is bounded by the list layout row count");
+    (outer_split != 0 && outer_split < outer_row_count).then_some(outer_split)
 }
 
 /// Fetch the validity child for `row_range` under `mask`, yielding `None` for a non-nullable list
@@ -528,6 +626,7 @@ mod tests {
     use crate::layouts::list::writer::ListLayoutStrategy;
     use crate::layouts::repartition::RepartitionStrategy;
     use crate::layouts::repartition::RepartitionWriterOptions;
+    use crate::scan::split_by::SplitBy;
     use crate::segments::SegmentFuture;
     use crate::segments::SegmentSource;
     use crate::segments::TestSegments;
@@ -917,10 +1016,63 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn maps_element_splits_to_outer_grid() {
+        assert_eq!(map_element_split_to_outer_grid(0, 100, 100, 8), None);
+        assert_eq!(map_element_split_to_outer_grid(20, 100, 100, 8), Some(25));
+        assert_eq!(map_element_split_to_outer_grid(25, 100, 100, 8), Some(25));
+        assert_eq!(map_element_split_to_outer_grid(50, 100, 100, 8), Some(50));
+        assert_eq!(map_element_split_to_outer_grid(75, 100, 100, 8), Some(75));
+        assert_eq!(map_element_split_to_outer_grid(100, 100, 100, 8), None);
+
+        let mut splits = (1..1_000)
+            .filter_map(|split| {
+                map_element_split_to_outer_grid(split, 1_000, 100_000, MAX_LIST_SPLIT_COUNT)
+            })
+            .collect::<Vec<_>>();
+        splits.dedup();
+
+        let expected = (1..MAX_LIST_SPLIT_COUNT)
+            .map(|grid_index| grid_index * 100_000 / MAX_LIST_SPLIT_COUNT)
+            .collect::<Vec<_>>();
+        assert_eq!(splits, expected);
+    }
+
+    #[tokio::test]
+    async fn nested_list_propagates_element_splits() -> VortexResult<()> {
+        let inner = ListArray::try_new(
+            PrimitiveArray::from_iter(0..128_i32).into_array(),
+            PrimitiveArray::from_iter((0..=8_u32).map(|idx| idx * 16)).into_array(),
+            Validity::NonNullable,
+        )?
+        .into_array();
+        let outer = ListArray::try_new(
+            inner,
+            buffer![0u32, 2, 4, 6, 8].into_array(),
+            Validity::NonNullable,
+        )?
+        .into_array();
+
+        let inner_strategy =
+            ListLayoutStrategy::default().with_elements(chunked_elements_strategy());
+        let strategy = ListLayoutStrategy::default().with_elements(Arc::new(inner_strategy));
+        let (segments, layout, session) = write_layout(&strategy, outer).await?;
+        let reader =
+            layout.new_reader("".into(), segments, &session, &LayoutReaderContext::new())?;
+
+        let splits = SplitBy::Layout.splits(reader.as_ref(), &(0..4), &[FieldMask::All])?;
+        assert_eq!(splits, vec![0, 1, 2, 3, 4]);
+        Ok(())
+    }
+
     /// A list strategy whose `elements` child is repartitioned into two-element chunks, so the
     /// reader takes the bounded (chunk-skipping) path for strict sub-ranges. Offsets stay flat.
     fn chunked_elements_list_strategy() -> ListLayoutStrategy {
-        let chunked_elements: Arc<dyn LayoutStrategy> = Arc::new(RepartitionStrategy::new(
+        ListLayoutStrategy::default().with_elements(chunked_elements_strategy())
+    }
+
+    fn chunked_elements_strategy() -> Arc<dyn LayoutStrategy> {
+        Arc::new(RepartitionStrategy::new(
             ChunkedLayoutStrategy::new(FlatLayoutStrategy::default()),
             RepartitionWriterOptions {
                 block_size_minimum: 0,
@@ -928,8 +1080,7 @@ mod tests {
                 block_size_target: None,
                 canonicalize: true,
             },
-        ));
-        ListLayoutStrategy::default().with_elements(chunked_elements)
+        ))
     }
 
     struct CountingSegmentSource {

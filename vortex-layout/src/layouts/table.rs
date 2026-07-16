@@ -169,13 +169,18 @@ impl TableStrategy {
     }
 
     /// Enable writing list fields with [`ListLayoutStrategy`].
+    ///
+    /// **Note**: this is an unstable and experimental layout that is expected to change.
+    /// Using it may lead to unreadable files in the future.
     pub fn with_list_layout(self) -> Self {
         self.with_list_layout_factory(|strategy| Arc::new(strategy))
     }
 
-    /// Enable list layouts and transform each structural list writer into a physical strategy.
-    /// The factory receives a fully configured writer and is invoked independently for every list,
-    /// including nested lists.
+    /// Enable writing list fields with [`ListLayoutStrategy`] and wrap each list writer. This
+    /// allows repartitioning or zoning to operate in the list's outer-row space before shredding.
+    ///
+    /// **Note**: this is an unstable and experimental layout that is expected to change.
+    /// Using it may lead to unreadable files in the future.
     pub fn with_list_layout_factory(
         mut self,
         factory: impl Fn(ListLayoutStrategy) -> Arc<dyn LayoutStrategy> + Send + Sync + 'static,

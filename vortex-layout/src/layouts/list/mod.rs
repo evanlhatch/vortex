@@ -1,6 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+//! An experimental structural layout for list-typed columns. Note that this is expected to change.
+//!
+//! [`ListLayout`] decomposes a list column into independently configurable child layouts:
+//! `elements`, `offsets`, and, for nullable lists, `validity`. Keeping the children independent allows
+//! each child to use its own configurable layout and lets nested list elements (e.g. with List<List>) be decomposed recursively.
+//!
+//! This provides benefits such as:
+//! * Reading only the children needed to evaluate an expression. For example, `ListLength` does
+//!   not need to read list elements.
+//! * Restricting element reads to the range covered by the selected outer rows, avoiding elements
+//!   belonging exclusively to unselected leading or trailing lists.
+//! * Allowing each child to use its own compression, chunking, and pruning strategy.
+
 mod expr;
 mod reader;
 pub mod writer;
