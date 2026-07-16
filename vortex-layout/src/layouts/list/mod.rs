@@ -5,7 +5,7 @@
 //!
 //! [`ListLayout`] decomposes a list column into independently configurable child layouts:
 //! `elements`, `offsets`, and, for nullable lists, `validity`. Keeping the children independent allows
-//! each child to use its own configurable layout and lets nested list elements (e.g. with List<List>) be decomposed recursively.
+//! each child to use its own configurable layout and lets nested list elements (e.g. with `List<List>`) be decomposed recursively.
 //!
 //! This provides benefits such as:
 //! * Reading only the children needed to evaluate an expression. For example, `ListLength` does
