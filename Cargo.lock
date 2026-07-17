@@ -9777,7 +9777,9 @@ dependencies = [
 name = "vortex-btrblocks"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
  "codspeed-divan-compat",
+ "insta",
  "itertools 0.14.0",
  "num-traits",
  "pco",
@@ -9785,6 +9787,8 @@ dependencies = [
  "rstest",
  "rustc-hash",
  "test-with",
+ "tpchgen",
+ "tpchgen-arrow",
  "tracing",
  "vortex-alp",
  "vortex-array",

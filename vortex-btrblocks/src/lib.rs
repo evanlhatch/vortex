@@ -58,6 +58,8 @@ mod builder;
 mod canonical_compressor;
 /// Compression scheme implementations.
 pub mod schemes;
+#[cfg(test)]
+mod trace_tests;
 
 // Re-export framework types from vortex-compressor for backwards compatibility.
 // Btrblocks-specific exports.
