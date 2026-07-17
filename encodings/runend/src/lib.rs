@@ -18,6 +18,8 @@ mod iter;
 mod kernel;
 mod ops;
 mod rules;
+#[cfg(test)]
+mod trace_tests;
 
 #[doc(hidden)]
 pub mod _benchmarking {

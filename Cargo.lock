@@ -10501,6 +10501,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "codspeed-divan-compat",
+ "insta",
  "itertools 0.14.0",
  "num-traits",
  "prost 0.14.4",

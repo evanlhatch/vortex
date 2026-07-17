@@ -32,6 +32,7 @@ workspace = true
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 divan = { workspace = true }
+insta = { workspace = true }
 itertools = { workspace = true }
 rand = { workspace = true }
 rstest = { workspace = true }
