@@ -18,7 +18,8 @@ mod iter;
 mod kernel;
 mod ops;
 mod rules;
-#[cfg(all(test, not(codspeed)))]
+#[cfg(test)]
+#[cfg(not(codspeed))]
 mod trace_tests;
 
 #[doc(hidden)]
