@@ -42,6 +42,7 @@ use crate::ExecutionCtx;
 use crate::array::ArrayView;
 use crate::arrays::List;
 use crate::arrays::ListView;
+use crate::arrays::Map;
 use crate::canonical::Canonical;
 use crate::dtype::DType;
 use crate::match_each_decimal_value_type;
@@ -59,6 +60,7 @@ mod extension;
 mod fixed_size_list;
 mod list;
 mod listview;
+mod map;
 mod null;
 mod primitive;
 mod struct_;
@@ -70,6 +72,7 @@ pub use extension::*;
 pub use fixed_size_list::*;
 pub use list::*;
 pub use listview::*;
+pub use map::*;
 pub use null::*;
 pub use primitive::*;
 pub use struct_::*;
@@ -228,6 +231,22 @@ pub trait ArrayBuilder: Send {
             self.dtype()
         )
     }
+
+    /// Appends the values of a [`Map`]-encoded `array` to this builder.
+    ///
+    /// Only map-typed builders support this; canonical map arrays dispatch through this hook so
+    /// the generic offset and size types of their nested list-view builders stay erased.
+    fn append_map_array(
+        &mut self,
+        array: ArrayView<'_, Map>,
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<()> {
+        vortex_bail!(
+            "cannot append a Map array of dtype {} to a {} builder",
+            array.dtype(),
+            self.dtype()
+        )
+    }
 }
 
 /// Construct a new canonical builder for the given [`DType`].
@@ -288,9 +307,11 @@ pub fn builder_with_capacity(dtype: &DType, capacity: usize) -> Box<dyn ArrayBui
             2 * capacity, // Arbitrarily choose 2 times the `offsets` capacity here.
             capacity,
         )),
-        DType::Map(..) => {
-            vortex_error::vortex_panic!(InvalidArgument: "map builders are not yet supported")
-        }
+        DType::Map(map_dtype, nullability) => Box::new(MapBuilder::<u64, u64>::with_capacity(
+            map_dtype.clone(),
+            *nullability,
+            capacity,
+        )),
         DType::FixedSizeList(elem_dtype, list_size, null) => {
             Box::new(FixedSizeListBuilder::with_capacity(
                 Arc::clone(elem_dtype),

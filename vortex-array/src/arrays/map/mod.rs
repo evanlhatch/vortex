@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! Canonical map array scaffolding.
-//!
-//! The physical layout for maps has not been selected yet. This module only reserves the
-//! standard canonical-array structure and public type names.
+//! Canonical map arrays backed by [`ListView`](crate::arrays::ListView) entry storage.
 
 mod array;
-pub use array::MapArray;
 pub use array::MapArrayExt;
 pub use array::MapData;
 pub use array::MapDataParts;
@@ -16,3 +12,7 @@ pub(crate) mod compute;
 
 mod vtable;
 pub use vtable::Map;
+pub use vtable::MapArray;
+
+#[cfg(test)]
+mod tests;

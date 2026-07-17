@@ -5,8 +5,8 @@
 //!
 //! Canonical arrays are the default uncompressed representation for a logical dtype:
 //! [`NullArray`], [`BoolArray`], [`PrimitiveArray`], [`DecimalArray`], [`VarBinViewArray`],
-//! [`ListViewArray`], [`FixedSizeListArray`], [`StructArray`], [`ExtensionArray`], and
-//! [`VariantArray`].
+//! [`ListViewArray`], [`MapArray`], [`FixedSizeListArray`], [`StructArray`],
+//! [`ExtensionArray`], and [`VariantArray`].
 //!
 //! Utility and lazy arrays represent common transformations without immediately materializing
 //! their result. Examples include [`ChunkedArray`] for concatenation, [`ConstantArray`] for repeated

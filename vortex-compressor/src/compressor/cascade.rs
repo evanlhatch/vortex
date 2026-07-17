@@ -26,6 +26,7 @@ use vortex_array::arrays::struct_::StructArrayExt;
 use vortex_array::arrays::variant::VariantArrayExt;
 use vortex_array::scalar::Scalar;
 use vortex_error::VortexResult;
+use vortex_error::vortex_bail;
 
 use super::CascadingCompressor;
 use super::constant;
@@ -138,6 +139,7 @@ impl CascadingCompressor {
                     self.compress_list_view_array(list_view_array, compress_ctx, exec_ctx)
                 }
             }
+            Canonical::Map(_) => vortex_bail!("Map arrays are not yet supported by the compressor"),
             Canonical::FixedSizeList(fsl_array) => {
                 let compressed_elems = self.compress(fsl_array.elements(), exec_ctx)?;
 

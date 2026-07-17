@@ -29,6 +29,8 @@ use crate::arrays::FixedSizeList;
 use crate::arrays::FixedSizeListArray;
 use crate::arrays::ListView;
 use crate::arrays::ListViewArray;
+use crate::arrays::Map;
+use crate::arrays::MapArray;
 use crate::arrays::Null;
 use crate::arrays::NullArray;
 use crate::arrays::Primitive;
@@ -45,6 +47,7 @@ use crate::arrays::extension::ExtensionArrayExt;
 use crate::arrays::fixed_size_list::FixedSizeListArrayExt;
 use crate::arrays::listview::ListViewDataParts;
 use crate::arrays::listview::ListViewRebuildMode;
+use crate::arrays::map::MapArrayExt;
 use crate::arrays::primitive::PrimitiveDataParts;
 use crate::arrays::struct_::StructDataParts;
 use crate::arrays::varbinview::VarBinViewDataParts;
@@ -80,8 +83,9 @@ use crate::validity::Validity;
 ///
 /// # Arrow interoperability
 ///
-/// All of the Vortex canonical encodings have an equivalent Arrow encoding that can be built
-/// zero-copy, and the corresponding Arrow array types can also be built directly.
+/// Most Vortex canonical encodings have an equivalent Arrow encoding that can be built zero-copy,
+/// and the corresponding Arrow array types can also be built directly. Map array Arrow transport
+/// is not implemented yet.
 ///
 /// The full list of canonical types and their equivalent Arrow array types are:
 ///
@@ -91,6 +95,7 @@ use crate::validity::Validity;
 /// * `DecimalArray`: `arrow_array::Decimal128Array` and `arrow_array::Decimal256Array`
 /// * `VarBinViewArray`: `arrow_array::GenericByteViewArray`
 /// * `ListViewArray`: `arrow_array::ListViewArray`
+/// * `MapArray`: Vortex `ListView<Struct<key, value>>` storage
 /// * `FixedSizeListArray`: `arrow_array::FixedSizeListArray`
 /// * `StructArray`: `arrow_array::StructArray`
 ///
@@ -126,6 +131,7 @@ pub enum Canonical {
     Decimal(DecimalArray),
     VarBinView(VarBinViewArray),
     List(ListViewArray),
+    Map(MapArray),
     FixedSizeList(FixedSizeListArray),
     Struct(StructArray),
     /// Canonical storage for extension dtypes, wrapping the canonical form of the storage dtype.
@@ -144,6 +150,7 @@ macro_rules! match_each_canonical {
             Canonical::Decimal($ident) => $eval,
             Canonical::VarBinView($ident) => $eval,
             Canonical::List($ident) => $eval,
+            Canonical::Map($ident) => $eval,
             Canonical::FixedSizeList($ident) => $eval,
             Canonical::Struct($ident) => $eval,
             Canonical::Variant($ident) => $eval,
@@ -209,9 +216,14 @@ impl Canonical {
                 // An empty list view is trivially copyable to a list.
                 .with_zero_copy_to_list(true)
             }),
-            DType::Map(..) => {
-                vortex_panic!(InvalidArgument: "canonical map arrays are not yet supported")
-            }
+            DType::Map(map_dtype, nullability) => Canonical::Map(MapArray::new(
+                map_dtype.clone(),
+                Canonical::empty(&DType::List(
+                    Arc::new(map_dtype.entries_dtype()),
+                    *nullability,
+                ))
+                .into_listview(),
+            )),
             DType::FixedSizeList(elem_dtype, list_size, null) => Canonical::FixedSizeList(unsafe {
                 FixedSizeListArray::new_unchecked(
                     Canonical::empty(elem_dtype).into_array(),
@@ -269,6 +281,13 @@ impl Canonical {
             Canonical::List(array) => Ok(Canonical::List(
                 array.rebuild(ListViewRebuildMode::TrimElements, ctx)?,
             )),
+            Canonical::Map(array) => Ok(Canonical::Map(MapArray::new(
+                array.map_dtype().clone(),
+                array
+                    .entries()
+                    .into_owned()
+                    .rebuild(ListViewRebuildMode::TrimElements, ctx)?,
+            ))),
             _ => Ok(self.clone()),
         }
     }
@@ -372,6 +391,22 @@ impl Canonical {
         }
     }
 
+    pub fn as_map(&self) -> &MapArray {
+        if let Canonical::Map(a) = self {
+            a
+        } else {
+            vortex_panic!("Cannot get MapArray from {:?}", &self)
+        }
+    }
+
+    pub fn into_map(self) -> MapArray {
+        if let Canonical::Map(a) = self {
+            a
+        } else {
+            vortex_panic!("Cannot unwrap MapArray from {:?}", &self)
+        }
+    }
+
     pub fn as_fixed_size_list(&self) -> &FixedSizeListArray {
         if let Canonical::FixedSizeList(a) = self {
             a
@@ -460,6 +495,10 @@ pub trait ToCanonical {
     #[deprecated(note = "use `array.execute::<ListViewArray>(ctx)` instead")]
     fn to_listview(&self) -> ListViewArray;
 
+    /// Canonicalize into a [`MapArray`] if the target is [`Map`](DType::Map) typed.
+    #[deprecated(note = "use `array.execute::<MapArray>(ctx)` instead")]
+    fn to_map(&self) -> MapArray;
+
     /// Canonicalize into a [`FixedSizeListArray`] if the target is [`List`](DType::FixedSizeList)
     /// typed.
     #[deprecated(note = "use `array.execute::<FixedSizeListArray>(ctx)` instead")]
@@ -513,6 +552,12 @@ impl ToCanonical for ArrayRef {
         #[expect(deprecated)]
         let result = self.to_canonical().vortex_expect("to_canonical failed");
         result.into_listview()
+    }
+
+    fn to_map(&self) -> MapArray {
+        #[expect(deprecated)]
+        let result = self.to_canonical().vortex_expect("to_canonical failed");
+        result.into_map()
     }
 
     fn to_fixed_size_list(&self) -> FixedSizeListArray {
@@ -633,6 +678,18 @@ impl Executable for CanonicalValidity {
                     ListViewArray::new_unchecked(elements, offsets, sizes, validity.execute(ctx)?)
                         .with_zero_copy_to_list(zctl)
                 })))
+            }
+            Canonical::Map(map) => {
+                let map_dtype = map.map_dtype().clone();
+                let entries = map.entries().into_owned();
+                Ok(CanonicalValidity(Canonical::Map(MapArray::new(
+                    map_dtype,
+                    entries
+                        .into_array()
+                        .execute::<CanonicalValidity>(ctx)?
+                        .0
+                        .into_listview(),
+                ))))
             }
             Canonical::FixedSizeList(fsl) => {
                 let list_size = fsl.list_size();
@@ -795,6 +852,18 @@ impl Executable for RecursiveCanonical {
                     )
                     .with_zero_copy_to_list(zctl)
                 })))
+            }
+            Canonical::Map(map) => {
+                let map_dtype = map.map_dtype().clone();
+                let entries = map.entries().into_owned();
+                Ok(RecursiveCanonical(Canonical::Map(MapArray::new(
+                    map_dtype,
+                    entries
+                        .into_array()
+                        .execute::<RecursiveCanonical>(ctx)?
+                        .0
+                        .into_listview(),
+                ))))
             }
             Canonical::FixedSizeList(fsl) => {
                 let list_size = fsl.list_size();
@@ -982,6 +1051,18 @@ impl Executable for ListViewArray {
     }
 }
 
+/// Execute the array to canonical form and unwrap as a [`MapArray`].
+///
+/// This will panic if the array's dtype is not map.
+impl Executable for MapArray {
+    fn execute(array: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<Self> {
+        match array.try_downcast::<Map>() {
+            Ok(map) => Ok(map),
+            Err(array) => Ok(Canonical::execute(array, ctx)?.into_map()),
+        }
+    }
+}
+
 /// Execute the array to canonical form and unwrap as a [`FixedSizeListArray`].
 ///
 /// This will panic if the array's dtype is not fixed size list.
@@ -1033,6 +1114,7 @@ pub enum CanonicalView<'a> {
     Decimal(ArrayView<'a, Decimal>),
     VarBinView(ArrayView<'a, VarBinView>),
     List(ArrayView<'a, ListView>),
+    Map(ArrayView<'a, Map>),
     FixedSizeList(ArrayView<'a, FixedSizeList>),
     Struct(ArrayView<'a, Struct>),
     Extension(ArrayView<'a, Extension>),
@@ -1048,6 +1130,7 @@ impl From<CanonicalView<'_>> for Canonical {
             CanonicalView::Decimal(a) => Canonical::Decimal(a.into_owned()),
             CanonicalView::VarBinView(a) => Canonical::VarBinView(a.into_owned()),
             CanonicalView::List(a) => Canonical::List(a.into_owned()),
+            CanonicalView::Map(a) => Canonical::Map(a.into_owned()),
             CanonicalView::FixedSizeList(a) => Canonical::FixedSizeList(a.into_owned()),
             CanonicalView::Struct(a) => Canonical::Struct(a.into_owned()),
             CanonicalView::Extension(a) => Canonical::Extension(a.into_owned()),
@@ -1066,6 +1149,7 @@ impl CanonicalView<'_> {
             CanonicalView::Decimal(a) => a.array().clone(),
             CanonicalView::VarBinView(a) => a.array().clone(),
             CanonicalView::List(a) => a.array().clone(),
+            CanonicalView::Map(a) => a.array().clone(),
             CanonicalView::FixedSizeList(a) => a.array().clone(),
             CanonicalView::Struct(a) => a.array().clone(),
             CanonicalView::Extension(a) => a.array().clone(),
@@ -1087,6 +1171,7 @@ impl Matcher for AnyCanonical {
             || array.is::<Decimal>()
             || array.is::<Struct>()
             || array.is::<ListView>()
+            || array.is::<Map>()
             || array.is::<FixedSizeList>()
             || array.is::<VarBinView>()
             || array.is::<Variant>()
@@ -1107,6 +1192,8 @@ impl Matcher for AnyCanonical {
             Some(CanonicalView::Struct(a))
         } else if let Some(a) = array.as_opt::<ListView>() {
             Some(CanonicalView::List(a))
+        } else if let Some(a) = array.as_opt::<Map>() {
+            Some(CanonicalView::Map(a))
         } else if let Some(a) = array.as_opt::<FixedSizeList>() {
             Some(CanonicalView::FixedSizeList(a))
         } else if let Some(a) = array.as_opt::<VarBinView>() {
