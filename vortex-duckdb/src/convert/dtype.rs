@@ -24,6 +24,7 @@
 //! | `Struct` | `STRUCT` |
 //! | `Decimal` | `DECIMAL` |
 //! | `List` | `LIST` |
+//! | `Map` | `MAP` |
 //! | `Date` | `DATE` |
 //! | `Time` | `TIME` |
 //! | `Timestamp` | `TIMESTAMP` |
@@ -155,6 +156,12 @@ impl FromLogicalType for DType {
                     nullability,
                 )
             }
+            DUCKDB_TYPE::DUCKDB_TYPE_MAP => DType::map(
+                DType::from_logical_type(&logical_type.map_key_type(), Nullability::NonNullable)?,
+                DType::from_logical_type(&logical_type.map_value_type(), Nullability::Nullable)?,
+                false,
+                nullability,
+            )?,
             DUCKDB_TYPE::DUCKDB_TYPE_STRUCT => DType::Struct(
                 (0..logical_type.struct_type_child_count())
                     .map(|i| {
@@ -182,7 +189,6 @@ impl FromLogicalType for DType {
             other @ (DUCKDB_TYPE::DUCKDB_TYPE_TIME_TZ
             | DUCKDB_TYPE::DUCKDB_TYPE_INTERVAL
             | DUCKDB_TYPE::DUCKDB_TYPE_ENUM
-            | DUCKDB_TYPE::DUCKDB_TYPE_MAP
             | DUCKDB_TYPE::DUCKDB_TYPE_UUID
             | DUCKDB_TYPE::DUCKDB_TYPE_UNION
             | DUCKDB_TYPE::DUCKDB_TYPE_BIT
@@ -239,6 +245,12 @@ impl TryFrom<&DType> for LogicalType {
             DType::FixedSizeList(element_dtype, list_size, _) => {
                 let element_logical_type = LogicalType::try_from(element_dtype.as_ref())?;
                 return LogicalType::array_type(element_logical_type, *list_size);
+            }
+            DType::Map(map_dtype, _) => {
+                return LogicalType::map_type(
+                    LogicalType::try_from(&map_dtype.key_dtype())?,
+                    LogicalType::try_from(&map_dtype.value_dtype())?,
+                );
             }
             DType::Struct(struct_type, _) => {
                 return LogicalType::try_from(struct_type);
@@ -512,6 +524,31 @@ mod tests {
             logical_type.as_type_id(),
             cpp::DUCKDB_TYPE::DUCKDB_TYPE_LIST
         );
+    }
+
+    #[test]
+    fn test_map_type_roundtrip() -> VortexResult<()> {
+        let key = DType::Primitive(PType::I32, Nullability::NonNullable);
+        let value = DType::Utf8(Nullability::Nullable);
+        let dtype = DType::map(key.clone(), value.clone(), true, Nullability::Nullable)?;
+
+        let logical_type = LogicalType::try_from(&dtype)?;
+        assert_eq!(logical_type.as_type_id(), cpp::DUCKDB_TYPE::DUCKDB_TYPE_MAP);
+        assert_eq!(
+            logical_type.map_key_type().as_type_id(),
+            cpp::DUCKDB_TYPE::DUCKDB_TYPE_INTEGER
+        );
+        assert_eq!(
+            logical_type.map_value_type().as_type_id(),
+            cpp::DUCKDB_TYPE::DUCKDB_TYPE_VARCHAR
+        );
+
+        assert_eq!(
+            DType::from_logical_type(&logical_type, Nullability::Nullable)?,
+            DType::map(key, value, false, Nullability::Nullable)?
+        );
+
+        Ok(())
     }
 
     #[test]

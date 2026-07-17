@@ -4,6 +4,8 @@
 from decimal import Decimal
 from typing import Any, TypeAlias, final
 
+from typing_extensions import override
+
 from .dtype import DType
 
 ScalarPyType: TypeAlias = None | int | float | str | Decimal | bytes | list[ScalarPyType] | dict[str, ScalarPyType]
@@ -48,6 +50,12 @@ class StructScalar:
 class ListScalar:
     def as_py(self) -> bool | None: ...
     def element(self, idx: int) -> Scalar: ...
+
+@final
+class MapScalar(Scalar):
+    @override
+    def as_py(self) -> ScalarPyType: ...
+    def entry(self, idx: int) -> tuple[ScalarPyType, ScalarPyType]: ...
 
 @final
 class ExtensionScalar:

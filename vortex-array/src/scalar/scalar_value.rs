@@ -34,7 +34,7 @@ pub enum ScalarValue {
     Binary(ByteBuffer),
     /// A tuple of potentially null scalar values.
     ///
-    /// Used as the underlying representation for list, fixed-size list, and struct scalars.
+    /// Used as the underlying representation for list, fixed-size list, map, and struct scalars.
     Tuple(Vec<Option<ScalarValue>>),
     /// A row-specific scalar wrapped by `DType::Variant`.
     Variant(Box<Scalar>),
@@ -51,6 +51,7 @@ impl ScalarValue {
             DType::Utf8(_) => Self::Utf8(BufferString::empty()),
             DType::Binary(_) => Self::Binary(ByteBuffer::empty()),
             DType::List(..) => Self::Tuple(vec![]),
+            DType::Map(..) => Self::Tuple(vec![]),
             DType::FixedSizeList(edt, size, _) => {
                 let elements = (0..*size).map(|_| Some(Self::zero_value(edt))).collect();
                 Self::Tuple(elements)
@@ -92,6 +93,7 @@ impl ScalarValue {
             DType::Utf8(_) => Self::Utf8(BufferString::empty()),
             DType::Binary(_) => Self::Binary(ByteBuffer::empty()),
             DType::List(..) => Self::Tuple(vec![]),
+            DType::Map(..) => Self::Tuple(vec![]),
             DType::FixedSizeList(edt, size, _) => {
                 let elements = (0..*size).map(|_| Self::default_value(edt)).collect();
                 Self::Tuple(elements)

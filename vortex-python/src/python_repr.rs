@@ -80,6 +80,14 @@ impl Display for DTypePythonRepr<'_> {
                 size,
                 n.python_repr()
             ),
+            DType::Map(map, n) => write!(
+                f,
+                "map_({}, {}, keys_sorted={}, nullable={})",
+                map.key_dtype().python_repr(),
+                map.value_dtype().python_repr(),
+                if map.keys_sorted() { "True" } else { "False" },
+                n.python_repr()
+            ),
             DType::Struct(st, n) => write!(
                 f,
                 "struct({{{}}}, nullable={})",

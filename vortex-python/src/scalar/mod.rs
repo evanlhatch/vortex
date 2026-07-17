@@ -14,6 +14,7 @@ mod extension;
 pub mod factory;
 mod into_py;
 mod list;
+mod map;
 mod null;
 mod primitive;
 mod struct_;
@@ -35,6 +36,7 @@ use crate::scalar::bool::PyBoolScalar;
 use crate::scalar::decimal::PyDecimalScalar;
 use crate::scalar::extension::PyExtensionScalar;
 use crate::scalar::list::PyListScalar;
+use crate::scalar::map::PyMapScalar;
 use crate::scalar::null::PyNullScalar;
 use crate::scalar::primitive::PyPrimitiveScalar;
 use crate::scalar::struct_::PyStructScalar;
@@ -53,6 +55,7 @@ pub(crate) fn init(py: Python, parent: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyBoolScalar>()?;
     m.add_class::<PyExtensionScalar>()?;
     m.add_class::<PyListScalar>()?;
+    m.add_class::<PyMapScalar>()?;
     m.add_class::<PyNullScalar>()?;
     m.add_class::<PyPrimitiveScalar>()?;
     m.add_class::<PyDecimalScalar>()?;
@@ -116,6 +119,7 @@ impl PyScalar {
                 // of "fixed-size" only applies to full arrays, not scalars.
                 Self::with_subclass(py, scalar, PyListScalar)
             }
+            DType::Map(..) => Self::with_subclass(py, scalar, PyMapScalar),
             DType::Struct(..) => Self::with_subclass(py, scalar, PyStructScalar),
             DType::Union(..) => todo!("TODO(connor)[Union]: unimplemented"),
             DType::Variant(_) => Err(PyValueError::new_err(

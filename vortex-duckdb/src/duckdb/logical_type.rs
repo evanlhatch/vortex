@@ -16,6 +16,7 @@ use crate::cpp::duckdb_create_array_type;
 use crate::cpp::duckdb_create_decimal_type;
 use crate::cpp::duckdb_create_list_type;
 use crate::cpp::duckdb_create_logical_type;
+use crate::cpp::duckdb_create_map_type;
 use crate::cpp::duckdb_create_struct_type;
 use crate::cpp::duckdb_decimal_scale;
 use crate::cpp::duckdb_decimal_width;
@@ -111,6 +112,17 @@ impl LogicalType {
         if ptr.is_null() {
             vortex_bail!("Failed to create list type");
         }
+        Ok(unsafe { Self::own(ptr) })
+    }
+
+    /// Creates a DuckDB map logical type from its key and value types.
+    pub fn map_type(key_type: LogicalType, value_type: LogicalType) -> VortexResult<Self> {
+        let ptr = unsafe { duckdb_create_map_type(key_type.as_ptr(), value_type.as_ptr()) };
+
+        if ptr.is_null() {
+            vortex_bail!("Failed to create map logical type");
+        }
+
         Ok(unsafe { Self::own(ptr) })
     }
 

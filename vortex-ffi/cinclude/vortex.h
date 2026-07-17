@@ -111,6 +111,10 @@ typedef enum {
      * Nested fixed-size list type.
      */
     DTYPE_FIXED_SIZE_LIST = 9,
+    /**
+     * Nested map type.
+     */
+    DTYPE_MAP = 10,
 } vx_dtype_variant;
 
 /**
@@ -1074,6 +1078,23 @@ const vx_dtype *vx_dtype_fixed_size_list_element(const vx_dtype *dtype);
  * Returns the size of a fixed-size list.
  */
 uint32_t vx_dtype_fixed_size_list_size(const vx_dtype *dtype);
+
+/**
+ * If "dtype" is DTYPE_MAP, return its owned key dtype, return NULL otherwise.
+ * Returned dtype must be released with vx_dtype_free.
+ */
+const vx_dtype *vx_dtype_map_key_type(const vx_dtype *dtype);
+
+/**
+ * If "dtype" is DTYPE_MAP, return its owned value dtype, return NULL otherwise.
+ * Returned dtype must be released with vx_dtype_free.
+ */
+const vx_dtype *vx_dtype_map_value_type(const vx_dtype *dtype);
+
+/**
+ * Returns whether "dtype" is a map that asserts sorted keys.
+ */
+bool vx_dtype_map_keys_sorted(const vx_dtype *dtype);
 
 /**
  * Checks if the type is time.

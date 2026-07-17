@@ -13,6 +13,7 @@ use pyo3::types::PyFloat;
 use pyo3::types::PyInt;
 use pyo3::types::PyList;
 use pyo3::types::PyString;
+use pyo3::types::PyTuple;
 use vortex::dtype::DType;
 use vortex::dtype::FieldName;
 use vortex::dtype::FieldNames;
@@ -132,6 +133,20 @@ fn scalar_helper_inner(value: &Bound<'_, PyAny>, dtype: Option<&DType>) -> PyRes
 
     // dict
     if let Ok(dict) = value.cast::<PyDict>() {
+        if let Some(map_dtype @ DType::Map(map, _)) = dtype {
+            let entries = dict
+                .iter()
+                .map(|(key, value)| {
+                    Ok((
+                        scalar_helper(&key, Some(&map.key_dtype()))?,
+                        scalar_helper(&value, Some(&map.value_dtype()))?,
+                    ))
+                })
+                .collect::<PyVortexResult<Vec<_>>>()?;
+            return Scalar::try_map(map_dtype.clone(), entries)
+                .map_err(|err| PyValueError::new_err(err.to_string()));
+        }
+
         // Extract the field names from the dictionary keys
         let names: FieldNames = dict
             .keys()
@@ -177,16 +192,31 @@ fn scalar_helper_inner(value: &Bound<'_, PyAny>, dtype: Option<&DType>) -> PyRes
     }
 
     if let Ok(list) = value.cast::<PyList>() {
+        if let Some(map_dtype @ DType::Map(map, _)) = dtype {
+            let entries = list
+                .iter()
+                .map(|entry| {
+                    let (key, value) = map_entry(&entry)?;
+                    Ok((
+                        scalar_helper(&key, Some(&map.key_dtype()))?,
+                        scalar_helper(&value, Some(&map.value_dtype()))?,
+                    ))
+                })
+                .collect::<PyVortexResult<Vec<_>>>()?;
+            return Scalar::try_map(map_dtype.clone(), entries)
+                .map_err(|err| PyValueError::new_err(err.to_string()));
+        }
+
         if let Some(DType::List(element_dtype, ..)) = dtype {
             let elements = list
                 .iter()
                 .map(|e| scalar_helper_inner(&e, Some(element_dtype)))
                 .try_collect()?;
-            Scalar::list(
+            return Ok(Scalar::list(
                 Arc::clone(element_dtype),
                 elements,
                 Nullability::NonNullable,
-            );
+            ));
         } else {
             // If no dtype was provided, we need to infer the element dtype from the list contents.
             // We do this in a greedy way taking the first element dtype we find.
@@ -216,4 +246,20 @@ fn scalar_helper_inner(value: &Bound<'_, PyAny>, dtype: Option<&DType>) -> PyRes
         "Cannot convert Python object to Vortex scalar: {}",
         value.get_type()
     )))
+}
+
+fn map_entry<'py>(entry: &Bound<'py, PyAny>) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+    if let Ok(pair) = entry.cast::<PyTuple>()
+        && pair.len() == 2
+    {
+        return Ok((pair.get_item(0)?, pair.get_item(1)?));
+    }
+    if let Ok(pair) = entry.cast::<PyList>()
+        && pair.len() == 2
+    {
+        return Ok((pair.get_item(0)?, pair.get_item(1)?));
+    }
+    Err(PyValueError::new_err(
+        "Map scalars constructed from a list must contain two-item tuples or lists",
+    ))
 }

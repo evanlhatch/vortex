@@ -8,6 +8,7 @@ mod extension;
 mod factory;
 mod fixed_size_list;
 mod list;
+mod map;
 mod null;
 mod primitive;
 mod ptype;
@@ -46,6 +47,7 @@ use crate::dtype::decimal::PyDecimalDType;
 use crate::dtype::extension::PyExtensionDType;
 use crate::dtype::fixed_size_list::PyFixedSizeListDType;
 use crate::dtype::list::PyListDType;
+use crate::dtype::map::PyMapDType;
 use crate::dtype::null::PyNullDType;
 use crate::dtype::primitive::PyPrimitiveDType;
 use crate::dtype::struct_::PyStructDType;
@@ -73,6 +75,7 @@ pub(crate) fn init(py: Python, parent: &Bound<PyModule>) -> PyResult<()> {
     m.add_class::<PyStructDType>()?;
     m.add_class::<PyListDType>()?;
     m.add_class::<PyFixedSizeListDType>()?;
+    m.add_class::<PyMapDType>()?;
     m.add_class::<PyExtensionDType>()?;
 
     // Register factory functions.
@@ -87,6 +90,7 @@ pub(crate) fn init(py: Python, parent: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(factory::dtype_struct, &m)?)?;
     m.add_function(wrap_pyfunction!(factory::dtype_list, &m)?)?;
     m.add_function(wrap_pyfunction!(factory::dtype_fixed_size_list, &m)?)?;
+    m.add_function(wrap_pyfunction!(factory::dtype_map, &m)?)?;
     m.add_function(wrap_pyfunction!(factory::dtype_date, &m)?)?;
     m.add_function(wrap_pyfunction!(factory::dtype_time, &m)?)?;
     m.add_function(wrap_pyfunction!(factory::dtype_timestamp, &m)?)?;
@@ -134,6 +138,7 @@ impl PyDType {
             DType::Binary(..) => Self::with_subclass(py, dtype, PyBinaryDType),
             DType::List(..) => Self::with_subclass(py, dtype, PyListDType),
             DType::FixedSizeList(..) => Self::with_subclass(py, dtype, PyFixedSizeListDType),
+            DType::Map(..) => Self::with_subclass(py, dtype, PyMapDType),
             DType::Struct(..) => Self::with_subclass(py, dtype, PyStructDType),
             DType::Union(..) => todo!("TODO(connor)[Union]: unimplemented"),
             DType::Variant(_) => Err(PyValueError::new_err(

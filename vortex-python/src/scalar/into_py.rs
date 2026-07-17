@@ -16,6 +16,7 @@ use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
 use pyo3::types::PyList;
 use pyo3::types::PyString;
+use pyo3::types::PyTuple;
 use vortex::array::match_each_decimal_value;
 use vortex::buffer::BufferString;
 use vortex::buffer::ByteBuffer;
@@ -27,6 +28,7 @@ use vortex::error::VortexExpect;
 use vortex::error::vortex_err;
 use vortex::scalar::DecimalValue;
 use vortex::scalar::ListScalar;
+use vortex::scalar::MapScalar;
 use vortex::scalar::Scalar;
 use vortex::scalar::StructScalar;
 
@@ -83,6 +85,7 @@ impl<'py> IntoPyObject<'py> for PyVortex<&'_ Scalar> {
             DType::List(..) | DType::FixedSizeList(..) => {
                 PyVortex(self.0.as_list()).into_pyobject(py)
             }
+            DType::Map(..) => PyVortex(self.0.as_map()).into_pyobject(py),
             DType::Struct(..) => PyVortex(self.0.as_struct()).into_pyobject(py),
             DType::Union(..) => todo!("TODO(connor)[Union]: unimplemented"),
             DType::Variant(_) => Err(PyValueError::new_err(
@@ -146,6 +149,52 @@ impl<'py> IntoPyObject<'py> for PyVortex<ListScalar<'_>> {
 
         PyList::new(py, elements.iter().map(PyVortex)).map(|l| l.into_any())
     }
+}
+
+impl<'py> IntoPyObject<'py> for PyVortex<MapScalar<'_>> {
+    type Target = PyAny;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        if self.0.is_null() {
+            return Ok(py.None().into_pyobject(py)?);
+        }
+
+        let entries = self
+            .0
+            .entries()
+            .map(|(key, value)| {
+                Ok((
+                    PyVortex(&key).into_pyobject(py)?,
+                    PyVortex(&value).into_pyobject(py)?,
+                ))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+
+        let dictionary = PyDict::new(py);
+        for (key, value) in &entries {
+            if dictionary.set_item(key, value).is_err() {
+                return map_entries_to_py_list(py, &entries);
+            }
+        }
+        if dictionary.len() == entries.len() {
+            return Ok(dictionary.into_any());
+        }
+
+        map_entries_to_py_list(py, &entries)
+    }
+}
+
+fn map_entries_to_py_list<'py>(
+    py: Python<'py>,
+    entries: &[(Bound<'py, PyAny>, Bound<'py, PyAny>)],
+) -> PyResult<Bound<'py, PyAny>> {
+    let entries = entries
+        .iter()
+        .map(|(key, value)| PyTuple::new(py, [key.clone(), value.clone()]))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyList::new(py, entries)?.into_any())
 }
 
 trait DecimalIntoParts: Sized {

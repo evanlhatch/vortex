@@ -12,6 +12,7 @@ use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
+use vortex_error::vortex_ensure_eq;
 use vortex_error::vortex_err;
 use vortex_proto::scalar as pb;
 use vortex_proto::scalar::ListValue;
@@ -441,22 +442,38 @@ fn list_from_proto(
     dtype: &DType,
     session: &VortexSession,
 ) -> VortexResult<ScalarValue> {
-    let element_dtype = match dtype {
-        DType::List(edt, _) => edt,
-        DType::FixedSizeList(edt, ..) => edt,
-        _ => {
-            vortex_bail!(Serde: "expected List or FixedSizeList dtype for ListValue, got {dtype}")
-        }
-    };
+    let values = match dtype {
+        DType::List(element_dtype, _) | DType::FixedSizeList(element_dtype, ..) => v
+            .values
+            .iter()
+            .map(|value| ScalarValue::from_proto(value, element_dtype, session))
+            .collect::<VortexResult<Vec<_>>>()?,
+        DType::Struct(fields, _) => {
+            vortex_ensure_eq!(
+                v.values.len(),
+                fields.nfields(),
+                Serde: "expected {} struct fields for ListValue, got {}",
+                fields.nfields(),
+                v.values.len(),
+            );
 
-    let mut values = Vec::with_capacity(v.values.len());
-    for elem in v.values.iter() {
-        values.push(ScalarValue::from_proto(
-            elem,
-            element_dtype.as_ref(),
-            session,
-        )?);
-    }
+            v.values
+                .iter()
+                .zip(fields.fields())
+                .map(|(value, field_dtype)| ScalarValue::from_proto(value, &field_dtype, session))
+                .collect::<VortexResult<Vec<_>>>()?
+        }
+        DType::Map(map, _) => {
+            let entry_dtype = map.entries_dtype();
+            v.values
+                .iter()
+                .map(|entry| ScalarValue::from_proto(entry, &entry_dtype, session))
+                .collect::<VortexResult<Vec<_>>>()?
+        }
+        _ => vortex_bail!(
+            Serde: "expected a tuple-backed dtype for ListValue, got {dtype}"
+        ),
+    };
 
     Ok(ScalarValue::Tuple(values))
 }
@@ -542,6 +559,34 @@ mod tests {
                 Some(ScalarValue::Primitive(43i32.into())),
             ])),
         ));
+    }
+
+    #[test]
+    fn test_map() {
+        let dtype = DType::map(
+            DType::Primitive(PType::I32, Nullability::NonNullable),
+            DType::Utf8(Nullability::Nullable),
+            true,
+            Nullability::Nullable,
+        )
+        .unwrap();
+        round_trip(
+            Scalar::try_map(
+                dtype.clone(),
+                [
+                    (
+                        Scalar::primitive(1i32, Nullability::NonNullable),
+                        Scalar::utf8("one", Nullability::Nullable),
+                    ),
+                    (
+                        Scalar::primitive(2i32, Nullability::NonNullable),
+                        Scalar::null(DType::Utf8(Nullability::Nullable)),
+                    ),
+                ],
+            )
+            .unwrap(),
+        );
+        round_trip(Scalar::null(dtype));
     }
 
     #[test]

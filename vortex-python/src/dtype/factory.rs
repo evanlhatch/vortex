@@ -459,6 +459,37 @@ pub(super) fn dtype_fixed_size_list<'py>(
     )
 }
 
+/// Construct a map data type.
+///
+/// Parameters
+/// ----------
+/// key : :class:`DType`
+///     The non-nullable type of each map key.
+/// value : :class:`DType`
+///     The type of each map value.
+/// keys_sorted : :class:`bool`
+///     Whether producers assert that keys are sorted within every map value.
+/// nullable : :class:`bool`
+///     When :obj:`True`, :obj:`None` is a permissible map value.
+#[pyfunction(name = "map_")]
+#[pyo3(signature = (key, value, *, keys_sorted = false, nullable = false))]
+pub(super) fn dtype_map<'py>(
+    key: &'py Bound<'py, PyDType>,
+    value: &'py Bound<'py, PyDType>,
+    keys_sorted: bool,
+    nullable: bool,
+) -> PyVortexResult<Bound<'py, PyDType>> {
+    Ok(PyDType::init(
+        key.py(),
+        DType::map(
+            key.get().inner().clone(),
+            value.get().inner().clone(),
+            keys_sorted,
+            nullable.into(),
+        )?,
+    )?)
+}
+
 fn parse_time_unit(unit: &str) -> PyResult<TimeUnit> {
     match unit {
         "ns" => Ok(TimeUnit::Nanoseconds),

@@ -76,6 +76,10 @@ pub mod listview;
 pub use listview::ListView;
 pub use listview::ListViewArray;
 
+pub mod map;
+pub use map::Map;
+pub use map::MapArray;
+
 pub mod masked;
 pub use masked::Masked;
 pub use masked::MaskedArray;

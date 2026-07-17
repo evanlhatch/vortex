@@ -62,6 +62,8 @@ pub enum vx_dtype_variant {
     DTYPE_DECIMAL = 8,
     /// Nested fixed-size list type.
     DTYPE_FIXED_SIZE_LIST = 9,
+    /// Nested map type.
+    DTYPE_MAP = 10,
 }
 
 // TODO(connor)[Union]: Do we need to add union and variant here?
@@ -76,6 +78,7 @@ impl From<&DType> for vx_dtype_variant {
             DType::Binary(_) => vx_dtype_variant::DTYPE_BINARY,
             DType::List(..) => vx_dtype_variant::DTYPE_LIST,
             DType::FixedSizeList(..) => vx_dtype_variant::DTYPE_FIXED_SIZE_LIST,
+            DType::Map(..) => vx_dtype_variant::DTYPE_MAP,
             DType::Struct(..) => vx_dtype_variant::DTYPE_STRUCT,
             DType::Union(..) => todo!("TODO(connor)[Union]: unimplemented"),
             DType::Variant(_) => vortex_panic!("Variant DType is not supported in FFI yet"),
@@ -252,6 +255,36 @@ pub unsafe extern "C-unwind" fn vx_dtype_fixed_size_list_size(dtype: *const vx_d
         DType::FixedSizeList(_, size, _) => *size,
         _ => vortex_panic!("not a fixed-size list dtype"),
     }
+}
+
+/// If `dtype` is `DTYPE_MAP`, return its owned key dtype. Otherwise return `NULL`.
+///
+/// Returned dtypes must be released with [`vx_dtype_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn vx_dtype_map_key_type(dtype: *const vx_dtype) -> *const vx_dtype {
+    let Some(map_dtype) = vx_dtype::as_ref(dtype).as_map_opt() else {
+        return ptr::null();
+    };
+    vx_dtype::new(Arc::new(map_dtype.key_dtype()))
+}
+
+/// If `dtype` is `DTYPE_MAP`, return its owned value dtype. Otherwise return `NULL`.
+///
+/// Returned dtypes must be released with [`vx_dtype_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn vx_dtype_map_value_type(dtype: *const vx_dtype) -> *const vx_dtype {
+    let Some(map_dtype) = vx_dtype::as_ref(dtype).as_map_opt() else {
+        return ptr::null();
+    };
+    vx_dtype::new(Arc::new(map_dtype.value_dtype()))
+}
+
+/// Returns whether `dtype` is a map that asserts sorted keys.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn vx_dtype_map_keys_sorted(dtype: *const vx_dtype) -> bool {
+    vx_dtype::as_ref(dtype)
+        .as_map_opt()
+        .is_some_and(|map_dtype| map_dtype.keys_sorted())
 }
 
 /// Checks if the type is time.
@@ -571,6 +604,44 @@ mod tests {
     }
 
     #[test]
+    fn test_map_introspection() {
+        unsafe {
+            let map_dtype = vx_dtype::new(Arc::new(
+                DType::map(
+                    DType::Primitive(vortex::dtype::PType::I32, false.into()),
+                    DType::Utf8(true.into()),
+                    true,
+                    true.into(),
+                )
+                .unwrap(),
+            ));
+
+            assert_eq!(vx_dtype_get_variant(map_dtype), vx_dtype_variant::DTYPE_MAP);
+            assert!(vx_dtype_is_nullable(map_dtype));
+            assert!(vx_dtype_map_keys_sorted(map_dtype));
+
+            let key = vx_dtype_map_key_type(map_dtype);
+            assert_eq!(vx_dtype_get_variant(key), vx_dtype_variant::DTYPE_PRIMITIVE);
+            assert_eq!(vx_dtype_primitive_ptype(key), vx_ptype::PTYPE_I32);
+            assert!(!vx_dtype_is_nullable(key));
+
+            let value = vx_dtype_map_value_type(map_dtype);
+            assert_eq!(vx_dtype_get_variant(value), vx_dtype_variant::DTYPE_UTF8);
+            assert!(vx_dtype_is_nullable(value));
+
+            let non_map = vx_dtype_new_bool(false);
+            assert!(vx_dtype_map_key_type(non_map).is_null());
+            assert!(vx_dtype_map_value_type(non_map).is_null());
+            assert!(!vx_dtype_map_keys_sorted(non_map));
+
+            vx_dtype_free(non_map);
+            vx_dtype_free(value);
+            vx_dtype_free(key);
+            vx_dtype_free(map_dtype);
+        }
+    }
+
+    #[test]
     fn test_nested_fixed_size_lists() {
         unsafe {
             // Create inner fixed-size list: FSL<i32>[5]
@@ -661,6 +732,13 @@ mod tests {
                 4,
                 true.into(),
             ),
+            DType::map(
+                DType::Primitive(vortex::dtype::PType::I32, false.into()),
+                DType::Utf8(true.into()),
+                true,
+                true.into(),
+            )
+            .unwrap(),
         ];
 
         for dtype in dtypes {
@@ -675,6 +753,7 @@ mod tests {
                 DType::FixedSizeList(..) => {
                     assert_eq!(variant, vx_dtype_variant::DTYPE_FIXED_SIZE_LIST)
                 }
+                DType::Map(..) => assert_eq!(variant, vx_dtype_variant::DTYPE_MAP),
                 _ => {}
             }
         }

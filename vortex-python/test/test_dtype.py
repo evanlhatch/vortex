@@ -14,3 +14,12 @@ def test_factories():
     assert str(vx.uint(32)) == "u32"
     assert str(vx.float_(16)) == "f16"
     assert str(vx.struct({"a": vx.int_(nullable=True)})) == "{a=i64?}"
+
+
+def test_map_factory():
+    dtype = vx.map_(vx.int_(), vx.utf8(nullable=True), keys_sorted=True, nullable=True)
+
+    assert isinstance(dtype, vx.MapDType)
+    assert dtype.is_nullable()
+    assert str(dtype) == "map(i64, utf8?, keys_sorted=true)?"
+    assert "keys_sorted=True" in repr(dtype)
