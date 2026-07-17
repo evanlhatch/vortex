@@ -4,11 +4,15 @@
 use std::cmp;
 use std::iter;
 use std::ops::Range;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
+use std::task::ready;
 
-use futures::FutureExt;
 use futures::Stream;
 use futures::StreamExt;
+use futures::future;
 use futures::stream::BoxStream;
 use itertools::Either;
 use itertools::Itertools;
@@ -22,6 +26,7 @@ use vortex_array::stream::ArrayStreamAdapter;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_io::runtime::BlockingRuntime;
+use vortex_io::runtime::Handle;
 use vortex_io::runtime::Task;
 use vortex_io::session::RuntimeSessionExt;
 use vortex_scan::selection::Selection;
@@ -63,6 +68,155 @@ pub struct RepeatedScan {
     row_limit: Option<RowLimit>,
     /// The dtype of the projected arrays.
     dtype: DType,
+}
+
+/// A source of split tasks that has not yet applied task concurrency or output error handling.
+#[must_use = "task streams must be scheduled"]
+struct TaskStream {
+    inner: BoxStream<'static, Task<TaskResult>>,
+}
+
+impl TaskStream {
+    fn new(stream: impl Stream<Item = Task<TaskResult>> + Send + 'static) -> Self {
+        Self {
+            inner: stream.boxed(),
+        }
+    }
+
+    fn eager(handle: Handle, tasks: Vec<TaskFuture>) -> Self {
+        Self::new(futures::stream::iter(tasks).map(move |task| handle.spawn(task)))
+    }
+
+    fn unordered_filtered_limit(
+        handle: Handle,
+        split_ranges: Vec<Range<u64>>,
+        selection: Selection,
+        ctx: Arc<TaskContext>,
+        row_limit: RowLimit,
+    ) -> Self {
+        let take_limit = row_limit.clone();
+        Self::new(
+            futures::stream::iter(split_ranges)
+                .take_while(move |_| future::ready(!take_limit.is_exhausted()))
+                .filter_map(move |range| {
+                    // Build the row mask and split task synchronously so the I/O system sees the
+                    // split's ranges as soon as `buffer_unordered` pulls it, without cloning
+                    // `selection`.
+                    let row_mask = selection.row_mask(&range);
+                    let task = (!row_mask.mask().all_false()).then(|| {
+                        split_exec(Arc::clone(&ctx), row_mask, Some(row_limit.clone()))
+                            .unwrap_or_else(TaskFuture::terminal)
+                    });
+                    future::ready(task.map(|task| handle.spawn(task)))
+                }),
+        )
+    }
+
+    fn ordered_filtered_limit(
+        handle: Handle,
+        split_ranges: Vec<Range<u64>>,
+        selection: Selection,
+        ctx: Arc<TaskContext>,
+        row_limit: RowLimit,
+        concurrency: usize,
+    ) -> Self {
+        // Stage one: evaluate the filter for each split concurrently while preserving split
+        // order.
+        let filter_tasks = {
+            let filter_ctx = Arc::clone(&ctx);
+            let filter_handle = handle.clone();
+            let take_limit = row_limit.clone();
+            futures::stream::iter(split_ranges)
+                .take_while(move |_| future::ready(!take_limit.is_exhausted()))
+                .filter_map(move |range| {
+                    // Build the row mask synchronously so the I/O system sees the split's ranges
+                    // as soon as `buffered` pulls it, without cloning `selection`.
+                    let row_mask = selection.row_mask(&range);
+                    let task = (!row_mask.mask().all_false()).then(|| {
+                        filter_handle.spawn(filter_split(Arc::clone(&filter_ctx), row_mask))
+                    });
+                    future::ready(task)
+                })
+                .buffered(concurrency)
+        };
+
+        // Seam + stage two: reserve in split order (this map runs sequentially as the ordered
+        // stage-one stream is consumed), then spawn projection work for the reserved mask. The
+        // second gate drops results that were already filtering when an earlier split exhausted
+        // the budget, including any later filter errors.
+        let stage_two_limit = row_limit.clone();
+        Self::new(
+            filter_tasks
+                .take_while(move |_| future::ready(!stage_two_limit.is_exhausted()))
+                .map(move |result| {
+                    let task = match result {
+                        Ok((row_range, mask)) => {
+                            let mask = row_limit.limit(mask);
+                            if mask.all_false() {
+                                TaskFuture::empty()
+                            } else {
+                                project_split(Arc::clone(&ctx), row_range, mask)
+                            }
+                        }
+                        Err(error) => TaskFuture::recoverable(error),
+                    };
+                    handle.spawn(task)
+                }),
+        )
+    }
+}
+
+impl Stream for TaskStream {
+    type Item = Task<TaskResult>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+/// A buffered task stream that exposes arrays and applies the task error policy.
+pub(crate) struct ScheduledTaskStream {
+    tasks: Option<BoxStream<'static, TaskResult>>,
+}
+
+impl ScheduledTaskStream {
+    fn new(tasks: TaskStream, ordered: bool, concurrency: usize) -> Self {
+        let tasks = if ordered {
+            tasks.buffered(concurrency).boxed()
+        } else {
+            tasks.buffer_unordered(concurrency).boxed()
+        };
+        Self { tasks: Some(tasks) }
+    }
+}
+
+impl Stream for ScheduledTaskStream {
+    type Item = VortexResult<ArrayRef>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            let Some(tasks) = self.tasks.as_mut() else {
+                return Poll::Ready(None);
+            };
+            let result = ready!(tasks.as_mut().poll_next(cx));
+            let Some(result) = result else {
+                self.tasks = None;
+                return Poll::Ready(None);
+            };
+            match result {
+                TaskResult::Array(Some(array)) => return Poll::Ready(Some(Ok(array))),
+                TaskResult::Array(None) => {}
+                TaskResult::Recoverable(error) => return Poll::Ready(Some(Err(error))),
+                TaskResult::Terminal(error) => {
+                    // Drop queued and in-flight task handles before yielding the error. Their
+                    // `Drop` implementations abort work that can no longer contribute to this
+                    // limited scan.
+                    self.tasks = None;
+                    return Poll::Ready(Some(Err(error)));
+                }
+            }
+        }
+    }
 }
 
 impl RepeatedScan {
@@ -220,7 +374,7 @@ impl RepeatedScan {
     pub(crate) fn execute_stream(
         &self,
         row_range: Option<Range<u64>>,
-    ) -> VortexResult<impl Stream<Item = VortexResult<ArrayRef>> + Send + 'static> {
+    ) -> VortexResult<ScheduledTaskStream> {
         let num_workers = get_available_parallelism().unwrap_or(1);
         let row_limit = self
             .row_limit
@@ -243,33 +397,24 @@ impl RepeatedScan {
                 return Ok(self.ordered_filtered_limit_stream(row_range, row_limit, concurrency));
             }
 
-            let ctx = self.task_context();
-            let selection = self.selection.clone();
-            let task_limit = row_limit.clone();
-            let tasks = futures::stream::iter(self.split_ranges(row_range))
-                .take_while(move |_| futures::future::ready(!task_limit.is_exhausted()))
-                .filter_map(move |range| {
-                    // Build the row mask and split task synchronously so the IO system sees the
-                    // split's ranges as soon as `buffer_unordered` pulls it, without cloning
-                    // `selection`.
-                    let row_mask = selection.row_mask(&range);
-                    let spawned = (!row_mask.mask().all_false()).then(|| {
-                        let task = split_exec(Arc::clone(&ctx), row_mask, Some(row_limit.clone()))
-                            .unwrap_or_else(|err| async move { TaskResult::Terminal(err) }.boxed());
-                        handle.spawn(task)
-                    });
-                    async move { spawned }
-                });
-
-            return Ok(schedule(tasks, false, concurrency));
+            let tasks = TaskStream::unordered_filtered_limit(
+                handle,
+                self.split_ranges(row_range),
+                self.selection.clone(),
+                self.task_context(),
+                row_limit,
+            );
+            return Ok(ScheduledTaskStream::new(tasks, false, concurrency));
         }
 
         // No filter (or no limit): build every task eagerly so the IO system sees all split
         // ranges up front. A no-filter limit is applied to each selection mask inside `execute`.
-        let tasks = futures::stream::iter(self.execute(row_range, row_limit)?)
-            .map(move |task| handle.spawn(task));
+        let tasks = TaskStream::eager(handle, self.execute(row_range, row_limit)?);
 
-        Ok(schedule(tasks, self.ordered, concurrency))
+        Ok({
+            let ordered = self.ordered;
+            ScheduledTaskStream::new(tasks, ordered, concurrency)
+        })
     }
 
     /// Ordered filtered scan with a shared row limit.
@@ -287,83 +432,17 @@ impl RepeatedScan {
         row_range: Option<Range<u64>>,
         row_limit: RowLimit,
         concurrency: usize,
-    ) -> BoxStream<'static, VortexResult<ArrayRef>> {
-        let ctx = self.task_context();
-        let handle = self.session.handle();
-
-        // Stage one: evaluate the filter for each split concurrently while preserving split order.
-        let filter_tasks = {
-            let ctx = Arc::clone(&ctx);
-            let handle = handle.clone();
-            let selection = self.selection.clone();
-            let take_limit = row_limit.clone();
-            futures::stream::iter(self.split_ranges(row_range))
-                .take_while(move |_| futures::future::ready(!take_limit.is_exhausted()))
-                .filter_map(move |range| {
-                    // Build the row mask synchronously so the IO system sees the split's ranges as
-                    // soon as `buffered` pulls it, without cloning `selection`.
-                    let row_mask = selection.row_mask(&range);
-                    let spawned = (!row_mask.mask().all_false())
-                        .then(|| handle.spawn(filter_split(Arc::clone(&ctx), row_mask)));
-                    async move { spawned }
-                })
-                .buffered(concurrency)
-        };
-
-        // Seam + stage two: reserve in split order (this map runs sequentially as the ordered
-        // stage-one stream is consumed), then spawn projection work for the reserved mask. The
-        // second gate drops results that were already filtering when an earlier split exhausted
-        // the budget, including any later filter errors.
-        let stage_two_limit = row_limit.clone();
-        let tasks = filter_tasks
-            .take_while(move |_| futures::future::ready(!stage_two_limit.is_exhausted()))
-            .map(move |result| {
-                let task: TaskFuture = match result {
-                    Ok((row_range, mask)) => {
-                        let mask = row_limit.limit(mask);
-                        if mask.all_false() {
-                            async { TaskResult::Array(None) }.boxed()
-                        } else {
-                            project_split(Arc::clone(&ctx), row_range, mask)
-                        }
-                    }
-                    Err(err) => async move { TaskResult::Recoverable(err) }.boxed(),
-                };
-                handle.spawn(task)
-            });
-        schedule(tasks, true, concurrency)
+    ) -> ScheduledTaskStream {
+        let tasks = TaskStream::ordered_filtered_limit(
+            self.session.handle(),
+            self.split_ranges(row_range),
+            self.selection.clone(),
+            self.task_context(),
+            row_limit,
+            concurrency,
+        );
+        ScheduledTaskStream::new(tasks, true, concurrency)
     }
-}
-
-/// Spawn-buffer a stream of split tasks, preserving recoverable filter errors and stopping after
-/// a projection error that occurred after a row limit reservation.
-fn schedule<S>(
-    tasks: S,
-    ordered: bool,
-    concurrency: usize,
-) -> BoxStream<'static, VortexResult<ArrayRef>>
-where
-    S: Stream<Item = Task<TaskResult>> + Send + 'static,
-{
-    let mut stream = if ordered {
-        tasks.buffered(concurrency).boxed()
-    } else {
-        tasks.buffer_unordered(concurrency).boxed()
-    };
-    async_stream::stream! {
-        while let Some(result) = stream.next().await {
-            match result {
-                TaskResult::Array(Some(array)) => yield Ok(array),
-                TaskResult::Array(None) => {}
-                TaskResult::Recoverable(err) => yield Err(err),
-                TaskResult::Terminal(err) => {
-                    yield Err(err);
-                    return;
-                }
-            }
-        }
-    }
-    .boxed()
 }
 
 fn intersect_ranges(left: Option<&Range<u64>>, right: Option<Range<u64>>) -> Option<Range<u64>> {

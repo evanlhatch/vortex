@@ -729,11 +729,11 @@ fn estimate_to_df_precision(est: &Precision<u64>) -> DFPrecision<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::Duration;
     use std::pin::Pin;
+    use std::sync::Arc;
     use std::task::Context;
     use std::task::Poll;
+    use std::time::Duration;
 
     use futures::Stream;
     use futures::TryStreamExt;
@@ -845,9 +845,10 @@ mod tests {
         let streams =
             futures::stream::iter([Ok::<_, VortexError>(first), Ok::<_, VortexError>(second)]);
         let flattened = flatten_scan_streams(streams, true, 4, TokioRuntime::current());
-        let chunks = tokio::time::timeout(Duration::from_secs(1), flattened.try_collect::<Vec<_>>())
-            .await
-            .map_err(|_| vortex_err!("ordered flatten did not warm the later partition"))??;
+        let chunks =
+            tokio::time::timeout(Duration::from_secs(1), flattened.try_collect::<Vec<_>>())
+                .await
+                .map_err(|_| vortex_err!("ordered flatten did not warm the later partition"))??;
 
         assert_eq!(collect_i32(chunks)?, [0, 100]);
         Ok(())
