@@ -25,6 +25,12 @@ def test_varbin_array_round_trip():
     assert arr.to_arrow_array() == a
 
 
+def test_fixed_size_binary_array_round_trip():
+    a = pa.array([b"abc", None, b"def"], type=pa.binary(3))
+    arr = vortex.array(a)
+    assert arr.to_arrow_array() == a
+
+
 def test_varbin_array_take():
     a = vortex.array(pa.array(["a", "b", "c", "d"], type=pa.string_view()))
     assert a.take(vortex.array(pa.array([0, 2]))).to_arrow_array() == pa.array(
@@ -50,7 +56,6 @@ def test_scalar_at_out_of_bounds():
     [
         pa.duration("us"),
         pa.month_day_nano_interval(),
-        pa.binary(3),
     ],
 )
 def test_unsupported_arrow_type_raises_value_error(arrow_type: pa.DataType):
