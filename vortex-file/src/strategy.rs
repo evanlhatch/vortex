@@ -17,6 +17,7 @@ use vortex_array::arrays::Constant;
 use vortex_array::arrays::Decimal;
 use vortex_array::arrays::Dict;
 use vortex_array::arrays::Extension;
+use vortex_array::arrays::FixedSizeBinary;
 use vortex_array::arrays::FixedSizeList;
 use vortex_array::arrays::List;
 use vortex_array::arrays::ListView;
@@ -86,6 +87,7 @@ pub static ALLOWED_ENCODINGS: LazyLock<HashSet<ArrayId>> = LazyLock::new(|| {
     allowed.insert(Bool.id());
     allowed.insert(Primitive.id());
     allowed.insert(Decimal.id());
+    allowed.insert(FixedSizeBinary.id());
     allowed.insert(VarBin.id());
     allowed.insert(VarBinView.id());
     allowed.insert(List.id());
