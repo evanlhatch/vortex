@@ -25,7 +25,14 @@ from .matrix import (
 )
 
 
-def _tpch(scale_factor: float | int, storage: Storage, *, iterations: int | None = 10) -> BenchmarkDef:
+def _tpch(
+    scale_factor: float | int,
+    storage: Storage,
+    *,
+    group: BenchmarkGroup,
+    pr_base: bool,
+    iterations: int | None = 10,
+) -> BenchmarkDef:
     suffix = "" if scale_factor in {1, 100} else f"-{int(scale_factor)}"
     if storage is Storage.NVME:
         target_set = df(
@@ -51,8 +58,8 @@ def _tpch(scale_factor: float | int, storage: Storage, *, iterations: int | None
         storage=storage,
         scale_factor=scale_factor,
         iterations=iterations,
-        group=BenchmarkGroup.NIGHTLY if scale_factor == 100 else BenchmarkGroup.REGULAR,
-        pr_base=storage is Storage.NVME or scale_factor != 10,
+        group=group,
+        pr_base=pr_base,
         local_dir=local_dir,
         remote_key=remote_key,
     )
@@ -93,12 +100,12 @@ def _fineweb(storage: Storage) -> BenchmarkDef:
 BENCHMARKS: list[BenchmarkDef] = [
     _clickbench(Benchmark.CLICKBENCH, "Clickbench on NVME"),
     _clickbench(Benchmark.CLICKBENCH_SORTED, "Clickbench Sorted on NVME"),
-    _tpch(1.0, Storage.NVME),
-    _tpch(1.0, Storage.S3),
-    _tpch(10.0, Storage.NVME),
-    _tpch(10.0, Storage.S3),
-    _tpch(100, Storage.NVME, iterations=None),
-    _tpch(100.0, Storage.S3, iterations=None),
+    _tpch(1.0, Storage.NVME, group=BenchmarkGroup.REGULAR, pr_base=True),
+    _tpch(1.0, Storage.S3, group=BenchmarkGroup.REGULAR, pr_base=True),
+    _tpch(10.0, Storage.NVME, group=BenchmarkGroup.REGULAR, pr_base=True),
+    _tpch(10.0, Storage.S3, group=BenchmarkGroup.REGULAR, pr_base=False),
+    _tpch(100, Storage.NVME, group=BenchmarkGroup.NIGHTLY, pr_base=True, iterations=None),
+    _tpch(100.0, Storage.S3, group=BenchmarkGroup.NIGHTLY, pr_base=True, iterations=None),
     BenchmarkDef(
         id="tpcds-nvme",
         benchmark=Benchmark.TPCDS,

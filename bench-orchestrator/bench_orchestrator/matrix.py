@@ -206,12 +206,17 @@ def _matrix_entry(benchmark: BenchmarkDef, run_targets: TargetSet, data_format_t
 def resolve_matrix(profile: Profile, benchmarks: Iterable[BenchmarkDef]) -> list[dict[str, object]]:
     """Resolve a profile into GitHub Actions matrix entries."""
     entries: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
     for benchmark in benchmarks:
         if benchmark.group is not profile.group or not profile.benchmarks(benchmark):
             continue
+        if benchmark.id in seen_ids:
+            raise ValueError(f"Duplicate benchmark ID {benchmark.id!r} in resolved profile")
+        seen_ids.add(benchmark.id)
+
         run_targets = _valid_for_storage(profile.targets(benchmark), benchmark.storage)
         if len(run_targets) == 0:
-            continue
+            raise ValueError(f"Benchmark {benchmark.id!r} resolved to no runnable targets")
         data_format_targets = run_targets
         if profile.data_formats is not None:
             data_format_targets = _valid_for_storage(profile.data_formats(benchmark), benchmark.storage)

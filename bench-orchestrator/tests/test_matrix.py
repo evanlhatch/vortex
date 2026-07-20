@@ -6,6 +6,7 @@
 import json
 from typing import cast
 
+import pytest
 from bench_orchestrator import cli as cli_module
 from bench_orchestrator.benchmarks import BENCHMARKS, PROFILES
 from bench_orchestrator.config import Benchmark, Engine, Format
@@ -15,6 +16,7 @@ from bench_orchestrator.matrix import (
     BenchmarkGroup,
     Profile,
     Storage,
+    TargetSet,
     all_targets,
     defaults,
     df,
@@ -75,15 +77,54 @@ def test_resolver_emits_the_fields_consumed_by_the_workflow() -> None:
     }
 
 
+def test_resolver_rejects_benchmarks_without_runnable_targets() -> None:
+    benchmark = BenchmarkDef(
+        id="empty",
+        benchmark=Benchmark.TPCH,
+        name="Empty",
+        targets=df(Format.PARQUET),
+    )
+
+    with pytest.raises(ValueError, match="Benchmark 'empty' resolved to no runnable targets"):
+        _ = resolve_matrix(Profile(targets=lambda _benchmark: TargetSet()), [benchmark])
+
+
+def test_resolver_rejects_duplicate_ids_within_a_profile() -> None:
+    benchmarks = [
+        BenchmarkDef(
+            id="duplicate",
+            benchmark=Benchmark.TPCH,
+            name="First",
+            targets=df(Format.PARQUET),
+        ),
+        BenchmarkDef(
+            id="duplicate",
+            benchmark=Benchmark.TPCDS,
+            name="Second",
+            targets=df(Format.VORTEX),
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="Duplicate benchmark ID 'duplicate' in resolved profile"):
+        _ = resolve_matrix(Profile(), benchmarks)
+
+
 def test_ci_profiles_have_distinct_and_consistent_roles() -> None:
     assert set(PROFILES) == {"develop", "pr", "pr-full", "nightly", "vortex"}
     regular_ids = {benchmark.id for benchmark in BENCHMARKS if benchmark.group is BenchmarkGroup.REGULAR}
     nightly_ids = {benchmark.id for benchmark in BENCHMARKS if benchmark.group is BenchmarkGroup.NIGHTLY}
-    develop = {entry["id"]: entry for entry in resolve_matrix(PROFILES["develop"], BENCHMARKS)}
-    pr = {entry["id"]: entry for entry in resolve_matrix(PROFILES["pr"], BENCHMARKS)}
-    pr_full_matrix = {entry["id"]: entry for entry in resolve_matrix(PROFILES["pr-full"], BENCHMARKS)}
-    nightly = {entry["id"]: entry for entry in resolve_matrix(PROFILES["nightly"], BENCHMARKS)}
+    develop_entries = resolve_matrix(PROFILES["develop"], BENCHMARKS)
+    pr_entries = resolve_matrix(PROFILES["pr"], BENCHMARKS)
+    pr_full_entries = resolve_matrix(PROFILES["pr-full"], BENCHMARKS)
+    nightly_entries = resolve_matrix(PROFILES["nightly"], BENCHMARKS)
     vortex = resolve_matrix(PROFILES["vortex"], BENCHMARKS)
+    for entries in (develop_entries, pr_entries, pr_full_entries, nightly_entries, vortex):
+        assert len(entries) == len({entry["id"] for entry in entries})
+
+    develop = {entry["id"]: entry for entry in develop_entries}
+    pr = {entry["id"]: entry for entry in pr_entries}
+    pr_full_matrix = {entry["id"]: entry for entry in pr_full_entries}
+    nightly = {entry["id"]: entry for entry in nightly_entries}
 
     assert set(develop) == regular_ids
     assert set(pr_full_matrix) == regular_ids
