@@ -16,7 +16,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .benchmarks import BENCHMARKS, PROFILES
+from .benchmarks import BENCHMARKS
 from .comparison import analyzer
 from .comparison.reporter import pivot_comparison_table
 from .config import (
@@ -31,7 +31,7 @@ from .config import (
     parse_targets_json,
     resolve_axis_targets,
 )
-from .matrix import resolve_matrix
+from .matrix import MATRIX_PRESETS, resolve_matrix
 from .runner.builder import BenchmarkBuilder
 from .runner.executor import BenchmarkExecutor
 from .storage.store import ResultStore
@@ -219,26 +219,25 @@ def prepare_data(
 
 @app.command("matrix")
 def matrix(
-    profile: Annotated[
+    preset: Annotated[
         str | None,
-        typer.Argument(help="Profile to resolve; omit to list available profiles"),
+        typer.Argument(help="Matrix preset to render; omit to list available presets"),
     ] = None,
-    list_profiles: Annotated[bool, typer.Option("--list", help="List available profiles and exit")] = False,
+    list_presets: Annotated[bool, typer.Option("--list", help="List available presets and exit")] = False,
     pretty: Annotated[bool, typer.Option("--pretty", help="Pretty-print the JSON output")] = False,
 ) -> None:
-    """Emit the GitHub Actions benchmark matrix for a profile."""
-    if profile is None or list_profiles:
-        for name, prof in PROFILES.items():
-            console.print(f"[bold cyan]{name}[/bold cyan]: {prof.description}")
+    """Emit a GitHub Actions benchmark matrix."""
+    if preset is None or list_presets:
+        for name, description in MATRIX_PRESETS.items():
+            console.print(f"[bold cyan]{name}[/bold cyan]: {description}")
         return
 
-    prof = PROFILES.get(profile)
-    if prof is None:
-        known = ", ".join(PROFILES)
-        console.print(f"[red]Unknown profile '{profile}'. Available: {known}[/red]")
+    if preset not in MATRIX_PRESETS:
+        known = ", ".join(MATRIX_PRESETS)
+        console.print(f"[red]Unknown matrix preset '{preset}'. Available: {known}[/red]")
         raise typer.Exit(1)
 
-    entries = resolve_matrix(prof, BENCHMARKS)
+    entries = resolve_matrix(preset, BENCHMARKS)
     typer.echo(json.dumps(entries, indent=2 if pretty else None))
 
 

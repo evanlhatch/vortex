@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-"""SQL benchmark declarations and CI profiles.
+"""SQL benchmark declarations used by CI matrices.
 
 Edit this file when changing benchmark coverage. Matrix rendering lives in
 ``bench_orchestrator.matrix`` so workflow shape and benchmark coverage do not drift together.
@@ -13,15 +13,9 @@ from .matrix import (
     STANDARD,
     BenchmarkDef,
     BenchmarkGroup,
-    Profile,
     Storage,
-    all_targets,
-    defaults,
     df,
     duck,
-    pr_base_benchmarks,
-    pr_defaults,
-    pr_full,
 )
 
 
@@ -30,7 +24,7 @@ def _tpch(
     storage: Storage,
     *,
     group: BenchmarkGroup,
-    pr_base: bool,
+    run_in_pr: bool = True,
     iterations: int | None = 10,
 ) -> BenchmarkDef:
     suffix = "" if scale_factor in {1, 100} else f"-{int(scale_factor)}"
@@ -59,7 +53,7 @@ def _tpch(
         scale_factor=scale_factor,
         iterations=iterations,
         group=group,
-        pr_base=pr_base,
+        run_in_pr=run_in_pr,
         local_dir=local_dir,
         remote_key=remote_key,
     )
@@ -100,12 +94,12 @@ def _fineweb(storage: Storage) -> BenchmarkDef:
 BENCHMARKS: list[BenchmarkDef] = [
     _clickbench(Benchmark.CLICKBENCH, "Clickbench on NVME"),
     _clickbench(Benchmark.CLICKBENCH_SORTED, "Clickbench Sorted on NVME"),
-    _tpch(1.0, Storage.NVME, group=BenchmarkGroup.REGULAR, pr_base=True),
-    _tpch(1.0, Storage.S3, group=BenchmarkGroup.REGULAR, pr_base=True),
-    _tpch(10.0, Storage.NVME, group=BenchmarkGroup.REGULAR, pr_base=True),
-    _tpch(10.0, Storage.S3, group=BenchmarkGroup.REGULAR, pr_base=False),
-    _tpch(100, Storage.NVME, group=BenchmarkGroup.NIGHTLY, pr_base=True, iterations=None),
-    _tpch(100.0, Storage.S3, group=BenchmarkGroup.NIGHTLY, pr_base=True, iterations=None),
+    _tpch(1.0, Storage.NVME, group=BenchmarkGroup.REGULAR),
+    _tpch(1.0, Storage.S3, group=BenchmarkGroup.REGULAR),
+    _tpch(10.0, Storage.NVME, group=BenchmarkGroup.REGULAR),
+    _tpch(10.0, Storage.S3, group=BenchmarkGroup.REGULAR, run_in_pr=False),
+    _tpch(100, Storage.NVME, group=BenchmarkGroup.NIGHTLY, iterations=None),
+    _tpch(100.0, Storage.S3, group=BenchmarkGroup.NIGHTLY, iterations=None),
     BenchmarkDef(
         id="tpcds-nvme",
         benchmark=Benchmark.TPCDS,
@@ -136,7 +130,7 @@ BENCHMARKS: list[BenchmarkDef] = [
         name="Appian on NVME",
         targets=STANDARD | duck(Format.DUCKDB),
         pr_targets=DEFAULTS | duck(Format.DUCKDB),
-        pr_base=False,
+        run_in_pr=False,
         iterations=10,
     ),
     BenchmarkDef(
@@ -144,33 +138,7 @@ BENCHMARKS: list[BenchmarkDef] = [
         benchmark=Benchmark.VORTEX_QUERIES,
         name="Vortex queries",
         targets=DEFAULTS,
-        group=BenchmarkGroup.VORTEX,
+        run_in_pr=False,
         iterations=100,
     ),
 ]
-
-PROFILES: dict[str, Profile] = {
-    "develop": Profile(
-        targets=all_targets,
-        description="Every regular SQL benchmark at full target coverage.",
-    ),
-    "pr": Profile(
-        benchmarks=pr_base_benchmarks,
-        targets=pr_defaults,
-        description="The cheaper pull-request SQL benchmark lane.",
-    ),
-    "pr-full": Profile(
-        targets=pr_full,
-        data_formats=all_targets,
-        description="Every regular SQL benchmark at full PR target coverage.",
-    ),
-    "nightly": Profile(
-        group=BenchmarkGroup.NIGHTLY,
-        targets=defaults,
-        description="Large-scale SF=100 TPC-H on NVMe and S3 at default targets.",
-    ),
-    "vortex": Profile(
-        group=BenchmarkGroup.VORTEX,
-        description="The Vortex query suite run on pushes and pull requests.",
-    ),
-}

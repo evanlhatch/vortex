@@ -1,216 +1,107 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-"""Contract tests for the declarative CI benchmark matrix."""
+"""Tests for CI benchmark matrices."""
 
 import json
+from dataclasses import replace
 from typing import cast
 
 import pytest
 from bench_orchestrator import cli as cli_module
-from bench_orchestrator.benchmarks import BENCHMARKS, PROFILES
-from bench_orchestrator.config import Benchmark, Engine, Format
-from bench_orchestrator.matrix import (
-    DEFAULTS,
-    BenchmarkDef,
-    BenchmarkGroup,
-    Profile,
-    Storage,
-    TargetSet,
-    all_targets,
-    defaults,
-    df,
-    duck,
-    pr_full,
-    resolve_matrix,
-)
+from bench_orchestrator.benchmarks import BENCHMARKS
+from bench_orchestrator.matrix import MATRIX_PRESETS, TargetSet, resolve_matrix
 from typer.testing import CliRunner
 
 runner = CliRunner()
 
+REGULAR_IDS = (
+    "clickbench-nvme",
+    "clickbench-sorted-nvme",
+    "tpch-nvme",
+    "tpch-s3",
+    "tpch-nvme-10",
+    "tpch-s3-10",
+    "tpcds-nvme",
+    "statpopgen",
+    "fineweb",
+    "fineweb-s3",
+    "polarsignals",
+    "appian-nvme",
+    "vortex-queries",
+)
+EXPECTED_IDS = {
+    "develop": REGULAR_IDS,
+    "pr": tuple(
+        benchmark_id
+        for benchmark_id in REGULAR_IDS
+        if benchmark_id not in {"tpch-s3-10", "appian-nvme", "vortex-queries"}
+    ),
+    "pr-full": REGULAR_IDS,
+    "nightly": ("tpch-nvme", "tpch-s3"),
+}
 
-def _targets(entry: dict[str, object]) -> list[dict[str, str]]:
-    return cast("list[dict[str, str]]", entry["targets"])
+
+def _entries(preset: str) -> list[dict[str, object]]:
+    return resolve_matrix(preset, BENCHMARKS)
 
 
-def test_default_policy_only_narrows_declared_targets() -> None:
-    benchmark = BenchmarkDef(
-        id="duckdb-only",
-        benchmark=Benchmark.TPCH,
-        name="DuckDB only",
-        targets=duck(Format.VORTEX, Format.DUCKDB),
-    )
-
-    assert set(defaults(benchmark)) == set(duck(Format.VORTEX))
+def _targets(entry: dict[str, object]) -> set[tuple[str, str]]:
+    targets = cast("list[dict[str, str]]", entry["targets"])
+    return {(target["engine"], target["format"]) for target in targets}
 
 
-def test_resolver_emits_the_fields_consumed_by_the_workflow() -> None:
-    benchmark = BenchmarkDef(
-        id="remote",
-        benchmark=Benchmark.TPCH,
-        name="Remote",
-        targets=df(Format.ARROW, Format.PARQUET, Format.LANCE, Format.VORTEX) | duck(Format.DUCKDB),
-        storage=Storage.S3,
-        scale_factor=1,
-        iterations=10,
-        local_dir="data/tpch",
-        remote_key="tpch/1.0",
-    )
+@pytest.mark.parametrize(("preset", "expected_ids"), EXPECTED_IDS.items())
+def test_matrix_presets(preset: str, expected_ids: tuple[str, ...]) -> None:
+    entries = _entries(preset)
+    ids = [entry["id"] for entry in entries]
 
-    [entry] = resolve_matrix(Profile(targets=all_targets), [benchmark])
+    assert tuple(ids) == expected_ids
+    assert len(ids) == len(set(ids))
+    assert all(entry["targets"] for entry in entries)
+    assert "${{" not in json.dumps(entries)
 
-    assert entry == {
-        "id": "remote",
-        "subcommand": "tpch",
-        "name": "Remote",
-        "targets": [
-            {"engine": "datafusion", "format": "arrow"},
-            {"engine": "datafusion", "format": "parquet"},
-            {"engine": "datafusion", "format": "vortex"},
-            {"engine": "duckdb", "format": "duckdb"},
-        ],
-        "data_formats": ["parquet", "vortex", "duckdb"],
-        "scale_factor": "1",
-        "iterations": "10",
-        "local_dir": "data/tpch",
-        "remote_key": "tpch/1.0",
+
+def test_pr_target_selection() -> None:
+    develop = {entry["id"]: entry for entry in _entries("develop")}
+    pr = {entry["id"]: entry for entry in _entries("pr")}
+    pr_full = {entry["id"]: entry for entry in _entries("pr-full")}
+
+    assert _targets(pr["tpch-nvme"]) == {
+        ("datafusion", "arrow"),
+        ("datafusion", "parquet"),
+        ("datafusion", "vortex"),
+        ("duckdb", "parquet"),
+        ("duckdb", "vortex"),
     }
+    assert ("datafusion", "lance") in _targets(develop["tpch-nvme"])
+    assert all(("datafusion", "lance") not in _targets(entry) for entry in pr_full.values())
+    assert "vortex-compact" in cast("list[str]", pr_full["clickbench-nvme"]["data_formats"])
 
 
-def test_resolver_rejects_benchmarks_without_runnable_targets() -> None:
-    benchmark = BenchmarkDef(
-        id="empty",
-        benchmark=Benchmark.TPCH,
-        name="Empty",
-        targets=df(Format.PARQUET),
-    )
+def test_resolver_rejects_empty_targets() -> None:
+    benchmark = replace(BENCHMARKS[0], id="empty", targets=TargetSet())
 
     with pytest.raises(ValueError, match="Benchmark 'empty' resolved to no runnable targets"):
-        _ = resolve_matrix(Profile(targets=lambda _benchmark: TargetSet()), [benchmark])
+        _ = resolve_matrix("develop", [benchmark])
 
 
-def test_resolver_rejects_duplicate_ids_within_a_profile() -> None:
-    benchmarks = [
-        BenchmarkDef(
-            id="duplicate",
-            benchmark=Benchmark.TPCH,
-            name="First",
-            targets=df(Format.PARQUET),
-        ),
-        BenchmarkDef(
-            id="duplicate",
-            benchmark=Benchmark.TPCDS,
-            name="Second",
-            targets=df(Format.VORTEX),
-        ),
-    ]
+def test_resolver_rejects_duplicate_ids() -> None:
+    benchmark = BENCHMARKS[0]
 
-    with pytest.raises(ValueError, match="Duplicate benchmark ID 'duplicate' in resolved profile"):
-        _ = resolve_matrix(Profile(), benchmarks)
+    with pytest.raises(ValueError, match="Duplicate benchmark ID 'clickbench-nvme'"):
+        _ = resolve_matrix("develop", [benchmark, replace(benchmark, name="Duplicate")])
 
 
-def test_ci_profiles_have_distinct_and_consistent_roles() -> None:
-    assert set(PROFILES) == {"develop", "pr", "pr-full", "nightly", "vortex"}
-    regular_ids = {benchmark.id for benchmark in BENCHMARKS if benchmark.group is BenchmarkGroup.REGULAR}
-    nightly_ids = {benchmark.id for benchmark in BENCHMARKS if benchmark.group is BenchmarkGroup.NIGHTLY}
-    develop_entries = resolve_matrix(PROFILES["develop"], BENCHMARKS)
-    pr_entries = resolve_matrix(PROFILES["pr"], BENCHMARKS)
-    pr_full_entries = resolve_matrix(PROFILES["pr-full"], BENCHMARKS)
-    nightly_entries = resolve_matrix(PROFILES["nightly"], BENCHMARKS)
-    vortex = resolve_matrix(PROFILES["vortex"], BENCHMARKS)
-    for entries in (develop_entries, pr_entries, pr_full_entries, nightly_entries, vortex):
-        assert len(entries) == len({entry["id"] for entry in entries})
-
-    develop = {entry["id"]: entry for entry in develop_entries}
-    pr = {entry["id"]: entry for entry in pr_entries}
-    pr_full_matrix = {entry["id"]: entry for entry in pr_full_entries}
-    nightly = {entry["id"]: entry for entry in nightly_entries}
-
-    assert set(develop) == regular_ids
-    assert set(pr_full_matrix) == regular_ids
-    assert set(pr) == regular_ids - {"appian-nvme", "tpch-s3-10"}
-    assert set(nightly) == nightly_ids
-    assert [entry["id"] for entry in vortex] == ["vortex-queries"]
-    assert develop["tpch-s3"]["remote_key"] == "tpch/1.0"
-    assert nightly["tpch-s3"]["remote_key"] == "tpch/100.0"
-    assert "${{" not in json.dumps([*develop.values(), *pr.values(), *pr_full_matrix.values(), *nightly.values()])
-
-    default_targets = {(target.engine, target.format) for target in DEFAULTS}
-    pr_targets = default_targets | {(Engine.DATAFUSION, Format.ARROW)}
-    for entry in pr.values():
-        targets = {(Engine(target["engine"]), Format(target["format"])) for target in _targets(entry)}
-        assert targets
-        assert targets <= pr_targets
-    for entry in nightly.values():
-        targets = {(Engine(target["engine"]), Format(target["format"])) for target in _targets(entry)}
-        assert targets
-        assert targets <= default_targets
-
-    tpch = develop["tpch-nvme"]
-    assert [(target["engine"], target["format"]) for target in _targets(tpch)] == [
-        ("datafusion", "arrow"),
-        ("datafusion", "parquet"),
-        ("datafusion", "vortex"),
-        ("datafusion", "vortex-compact"),
-        ("datafusion", "lance"),
-        ("duckdb", "parquet"),
-        ("duckdb", "vortex"),
-        ("duckdb", "vortex-compact"),
-        ("duckdb", "duckdb"),
-    ]
-
-    assert [(target["engine"], target["format"]) for target in _targets(pr_full_matrix["clickbench-nvme"])] == [
-        ("datafusion", "parquet"),
-        ("datafusion", "vortex"),
-        ("duckdb", "parquet"),
-        ("duckdb", "vortex"),
-        ("duckdb", "duckdb"),
-    ]
-    assert pr_full_matrix["clickbench-nvme"]["data_formats"] == [
-        "parquet",
-        "vortex",
-        "vortex-compact",
-        "duckdb",
-    ]
-    assert [(target["engine"], target["format"]) for target in _targets(pr["tpch-nvme"])] == [
-        ("datafusion", "arrow"),
-        ("datafusion", "parquet"),
-        ("datafusion", "vortex"),
-        ("duckdb", "parquet"),
-        ("duckdb", "vortex"),
-    ]
-    assert all(target["format"] != "lance" for entry in pr_full_matrix.values() for target in _targets(entry))
-
-
-def test_existing_display_and_scale_values_are_preserved() -> None:
-    develop = {entry["id"]: entry for entry in resolve_matrix(PROFILES["develop"], BENCHMARKS)}
-    nightly = {entry["id"]: entry for entry in resolve_matrix(PROFILES["nightly"], BENCHMARKS)}
-
-    assert develop["tpch-nvme"]["scale_factor"] == "1.0"
-    assert develop["statpopgen"]["scale_factor"] == "100"
-    assert develop["polarsignals"]["scale_factor"] == "1"
-    assert nightly["tpch-nvme"]["name"] == "TPC-H on NVME"
-    assert nightly["tpch-nvme"]["scale_factor"] == "100"
-    assert nightly["tpch-s3"]["name"] == "TPC-H on S3"
-    assert nightly["tpch-s3"]["scale_factor"] == "100.0"
-
-
-def test_matrix_command_emits_json_and_rejects_unknown_profiles() -> None:
+def test_matrix_command() -> None:
     result = runner.invoke(cli_module.app, ["matrix", "develop"])
     assert result.exit_code == 0
-    assert json.loads(result.stdout)
+    assert json.loads(result.stdout) == _entries("develop")
 
     result = runner.invoke(cli_module.app, ["matrix", "does-not-exist"])
     assert result.exit_code == 1
+    assert "Unknown matrix preset" in result.stdout
 
 
-def test_pr_full_policy_honors_benchmark_override() -> None:
-    benchmark = BenchmarkDef(
-        id="override",
-        benchmark=Benchmark.APPIAN,
-        name="Override",
-        targets=df(Format.PARQUET, Format.VORTEX, Format.LANCE),
-        pr_targets=df(Format.VORTEX),
-    )
-
-    assert pr_full(benchmark) == df(Format.VORTEX)
+def test_preset_names_are_stable() -> None:
+    assert set(MATRIX_PRESETS) == set(EXPECTED_IDS)

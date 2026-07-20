@@ -71,13 +71,13 @@ vx-bench prepare-data <benchmark> [options]
 - `--opt`: Benchmark-specific options such as `scale-factor=10.0`
 
 
-### `matrix` - Resolve CI Benchmark Matrices
+### `matrix` - Render a CI Benchmark Matrix
 
-Emit the GitHub Actions `include:` array for a named profile. The benchmark workflows can use this
+Emit the GitHub Actions `include:` array for a named preset. The benchmark workflows use this
 to keep benchmark coverage in Python instead of copying large JSON matrices between YAML files.
 
 ```bash
-vx-bench matrix            # list available profiles
+vx-bench matrix            # list available presets
 vx-bench matrix develop    # emit compact JSON
 vx-bench matrix pr-full     # emit full pull-request coverage
 vx-bench matrix nightly --pretty
@@ -85,7 +85,7 @@ vx-bench matrix nightly --pretty
 
 **Options:**
 
-- `--list`: List available profiles and exit
+- `--list`: List available presets and exit
 - `--pretty`: Pretty-print the JSON output
 
 ### `compare` - Compare Results
@@ -155,23 +155,14 @@ vx-bench clean --older-than "30 days" [options]
 - `--keep-labeled`: Don't delete labeled runs (default: true)
 - `--dry-run, -n`: Show what would be deleted
 
-## Declarative Benchmark Matrix
+## CI Benchmark Matrices
 
-CI benchmark coverage is declared in `bench_orchestrator/benchmarks.py` and rendered by
-`bench_orchestrator/matrix.py`. This keeps the source of truth out of workflow YAML while still
-emitting the JSON shape GitHub Actions expects.
+CI benchmark entries live in `bench_orchestrator/benchmarks.py`. The `vx-bench matrix` command
+renders one of the `develop`, `pr`, `pr-full`, or `nightly` presets as the JSON expected by GitHub
+Actions.
 
-The model separates three review concerns:
-
-- **Benchmark definitions** declare the suite, storage location, scale factor, and supported
-  engine/format targets.
-- **Profiles** choose how much declared coverage each workflow should run (`develop`, `pr`,
-  `pr-full`, `nightly`, and `vortex`).
-- **Matrix rendering** converts a profile into stable GitHub Actions `include` entries with fields
-  such as `targets`, `data_formats`, `scale_factor`, `iterations`, and remote-storage keys.
-
-When adding coverage, update the declarations first and add focused tests for the resolved profile
-entries rather than duplicating large inline JSON matrices in workflow files.
+When adding coverage, update the benchmark declarations and the expected preset membership in
+`tests/test_matrix.py`.
 
 ## Example Workflows
 

@@ -139,4 +139,4 @@ jobs:
     secrets: inherit
     with:
       mode: "pr"
-      benchmark_profile: "pr-full"
+      matrix_preset: "pr-full"

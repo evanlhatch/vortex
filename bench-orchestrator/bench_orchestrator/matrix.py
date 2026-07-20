@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-"""Resolve declarative benchmark definitions into GitHub Actions matrices."""
+"""Render benchmark definitions as GitHub Actions matrices."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -29,7 +29,6 @@ class BenchmarkGroup(Enum):
 
     REGULAR = "regular"
     NIGHTLY = "nightly"
-    VORTEX = "vortex"
 
 
 def _dedupe(targets: Iterable[BenchmarkTarget]) -> tuple[BenchmarkTarget, ...]:
@@ -110,7 +109,7 @@ class BenchmarkDef:
     iterations: int | None = None
     group: BenchmarkGroup = BenchmarkGroup.REGULAR
     pr_targets: TargetSet | None = None
-    pr_base: bool = True
+    run_in_pr: bool = True
     local_dir: str | None = None
     remote_key: str | None = None
 
@@ -120,54 +119,48 @@ class BenchmarkDef:
         return self.benchmark.value
 
 
-TargetPolicy = Callable[[BenchmarkDef], TargetSet]
-BenchmarkPolicy = Callable[[BenchmarkDef], bool]
-
-
-def all_targets(benchmark: BenchmarkDef) -> TargetSet:
-    """Run every target declared by a benchmark."""
-    return benchmark.targets
-
-
-def defaults(benchmark: BenchmarkDef) -> TargetSet:
-    """Run the cheap default lane intersected with a benchmark's declared targets."""
+def _default_targets(benchmark: BenchmarkDef) -> TargetSet:
+    """Return the cheap default targets supported by a benchmark."""
     return TargetSet(tuple(target for target in benchmark.targets if target in DEFAULTS.targets))
 
 
-def pr_full(benchmark: BenchmarkDef) -> TargetSet:
+def _pr_full_targets(benchmark: BenchmarkDef) -> TargetSet:
     """Return the full target set supported by pull-request runners."""
     if benchmark.pr_targets is not None:
         return benchmark.pr_targets
     return TargetSet(tuple(target for target in benchmark.targets if target.format is not Format.LANCE))
 
 
-def pr_defaults(benchmark: BenchmarkDef) -> TargetSet:
+def _pr_targets(benchmark: BenchmarkDef) -> TargetSet:
     """Return the cheap PR lane while preserving Arrow coverage for regular TPC-H."""
     allowed = set(DEFAULTS)
     if benchmark.benchmark is Benchmark.TPCH:
         allowed.update(df(Format.ARROW))
-    return TargetSet(tuple(target for target in pr_full(benchmark) if target in allowed))
+    return TargetSet(tuple(target for target in _pr_full_targets(benchmark) if target in allowed))
 
 
-def all_benchmarks(_: BenchmarkDef) -> bool:
-    """Include every benchmark in a profile's group."""
-    return True
+MATRIX_PRESETS = {
+    "develop": "Every SQL benchmark at full target coverage.",
+    "pr": "The quicker pull-request SQL benchmark matrix.",
+    "pr-full": "Every SQL benchmark at full PR target coverage.",
+    "nightly": "Large-scale SF=100 TPC-H on NVMe and S3 at default targets.",
+}
 
 
-def pr_base_benchmarks(benchmark: BenchmarkDef) -> bool:
-    """Include benchmarks assigned to the cheaper PR lane."""
-    return benchmark.pr_base
+def _include_benchmark(preset: str, benchmark: BenchmarkDef) -> bool:
+    if preset == "nightly":
+        return benchmark.group is BenchmarkGroup.NIGHTLY
+    return benchmark.group is BenchmarkGroup.REGULAR and (preset != "pr" or benchmark.run_in_pr)
 
 
-@dataclass(frozen=True)
-class Profile:
-    """A named CI benchmark configuration."""
-
-    group: BenchmarkGroup = BenchmarkGroup.REGULAR
-    benchmarks: BenchmarkPolicy = all_benchmarks
-    targets: TargetPolicy = all_targets
-    data_formats: TargetPolicy | None = None
-    description: str = ""
+def _targets_for(preset: str, benchmark: BenchmarkDef) -> TargetSet:
+    if preset == "develop":
+        return benchmark.targets
+    if preset == "pr-full":
+        return _pr_full_targets(benchmark)
+    if preset == "pr":
+        return _pr_targets(benchmark)
+    return _default_targets(benchmark)
 
 
 def _valid_for_storage(target_set: TargetSet, storage: Storage) -> TargetSet:
@@ -203,22 +196,25 @@ def _matrix_entry(benchmark: BenchmarkDef, run_targets: TargetSet, data_format_t
     return entry
 
 
-def resolve_matrix(profile: Profile, benchmarks: Iterable[BenchmarkDef]) -> list[dict[str, object]]:
-    """Resolve a profile into GitHub Actions matrix entries."""
+def resolve_matrix(preset: str, benchmarks: Iterable[BenchmarkDef]) -> list[dict[str, object]]:
+    """Render a named preset as GitHub Actions matrix entries."""
+    if preset not in MATRIX_PRESETS:
+        known = ", ".join(MATRIX_PRESETS)
+        raise ValueError(f"Unknown matrix preset {preset!r}. Available: {known}")
+
     entries: list[dict[str, object]] = []
     seen_ids: set[str] = set()
     for benchmark in benchmarks:
-        if benchmark.group is not profile.group or not profile.benchmarks(benchmark):
+        if not _include_benchmark(preset, benchmark):
             continue
         if benchmark.id in seen_ids:
-            raise ValueError(f"Duplicate benchmark ID {benchmark.id!r} in resolved profile")
+            raise ValueError(f"Duplicate benchmark ID {benchmark.id!r} in matrix preset {preset!r}")
         seen_ids.add(benchmark.id)
 
-        run_targets = _valid_for_storage(profile.targets(benchmark), benchmark.storage)
+        run_targets = _valid_for_storage(_targets_for(preset, benchmark), benchmark.storage)
         if len(run_targets) == 0:
             raise ValueError(f"Benchmark {benchmark.id!r} resolved to no runnable targets")
-        data_format_targets = run_targets
-        if profile.data_formats is not None:
-            data_format_targets = _valid_for_storage(profile.data_formats(benchmark), benchmark.storage)
+        data_format_targets = benchmark.targets if preset == "pr-full" else run_targets
+        data_format_targets = _valid_for_storage(data_format_targets, benchmark.storage)
         entries.append(_matrix_entry(benchmark, run_targets, data_format_targets))
     return entries

@@ -6,10 +6,10 @@ on:
       mode:
         required: true
         type: string
-      benchmark_profile:
+      matrix_preset:
         required: true
         type: string
-        description: "Declarative benchmark profile to resolve"
+        description: "Named benchmark matrix to run"
       machine_type:
         required: false
         type: string
@@ -19,15 +19,15 @@ jobs:
   resolve-matrix:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     outputs:
       benchmark_matrix: ${{ steps.resolve.outputs.benchmark_matrix }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
-        if: inputs.mode == 'pr'
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
-        if: inputs.mode != 'pr'
+          ref: ${{ inputs.mode == 'pr' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - name: Install uv
         uses: spiraldb/actions/.github/actions/setup-uv@a746510eafaa926484c354541cfc49b2ec06cc63  # 0.18.6
         with:
@@ -36,16 +36,12 @@ jobs:
         id: resolve
         shell: bash
         env:
-          BENCHMARK_PROFILE: ${{ inputs.benchmark_profile }}
+          MATRIX_PRESET: ${{ inputs.matrix_preset }}
         run: |
           set -Eeuo pipefail
 
-          matrix="$(uv run --project bench-orchestrator vx-bench matrix "$BENCHMARK_PROFILE")"
-          {
-            echo 'benchmark_matrix<<__BENCHMARK_MATRIX__'
-            echo "$matrix"
-            echo '__BENCHMARK_MATRIX__'
-          } >> "$GITHUB_OUTPUT"
+          matrix="$(uv run --project bench-orchestrator vx-bench matrix "$MATRIX_PRESET")"
+          echo "benchmark_matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   bench:
     needs: resolve-matrix
@@ -70,12 +66,8 @@ jobs:
         with:
           sccache: s3
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
-        if: inputs.mode == 'pr'
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
-
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
-        if: inputs.mode != 'pr'
+          ref: ${{ inputs.mode == 'pr' && github.event.pull_request.head.sha || github.sha }}
       - name: Setup benchmark environment
         run: sudo bash scripts/setup-benchmark.sh
       - uses: ./.github/actions/setup-rust
@@ -225,7 +217,7 @@ jobs:
           message: |
             # 🚨🚨🚨❌❌❌ SQL BENCHMARK FAILED ❌❌❌🚨🚨🚨
 
-            Benchmark `${{ matrix.name }}` (${{ inputs.benchmark_profile }}) failed! Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+            Benchmark `${{ matrix.name }}` (${{ inputs.matrix_preset }}) failed! Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
           comment-tag: bench-pr-comment-${{ matrix.id }}
 
       - name: Upload Benchmark Results
