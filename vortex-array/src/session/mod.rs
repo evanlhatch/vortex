@@ -20,6 +20,7 @@ use crate::arrays::Constant;
 use crate::arrays::Decimal;
 use crate::arrays::Dict;
 use crate::arrays::Extension;
+use crate::arrays::FixedSizeBinary;
 use crate::arrays::FixedSizeList;
 use crate::arrays::List;
 use crate::arrays::ListView;
@@ -70,6 +71,7 @@ impl Default for ArraySession {
         this.register(Bool);
         this.register(Primitive);
         this.register(Decimal);
+        this.register(FixedSizeBinary);
         this.register(VarBinView);
         this.register(ListView);
         this.register(FixedSizeList);
