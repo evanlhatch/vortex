@@ -79,6 +79,7 @@ to keep benchmark coverage in Python instead of copying large JSON matrices betw
 ```bash
 vx-bench matrix            # list available profiles
 vx-bench matrix develop    # emit compact JSON
+vx-bench matrix pr-full     # emit full pull-request coverage
 vx-bench matrix nightly --pretty
 ```
 
@@ -164,10 +165,10 @@ The model separates three review concerns:
 
 - **Benchmark definitions** declare the suite, storage location, scale factor, and supported
   engine/format targets.
-- **Profiles** choose how much declared coverage each workflow should run (`develop`, `pr`, and
-  `nightly`).
+- **Profiles** choose how much declared coverage each workflow should run (`develop`, `pr`,
+  `pr-full`, `nightly`, and `vortex`).
 - **Matrix rendering** converts a profile into stable GitHub Actions `include` entries with fields
-  such as `targets`, `data_formats`, `scale_factor`, `iterations`, and remote-storage metadata.
+  such as `targets`, `data_formats`, `scale_factor`, `iterations`, and remote-storage keys.
 
 When adding coverage, update the declarations first and add focused tests for the resolved profile
 entries rather than duplicating large inline JSON matrices in workflow files.

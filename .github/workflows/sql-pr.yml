@@ -39,4 +39,4 @@ jobs:
     secrets: inherit
     with:
       mode: "pr"
-      benchmark_profile: ${{ inputs.benchmark_profile || 'base' }}
+      benchmark_profile: ${{ inputs.benchmark_profile == 'full' && 'pr-full' || 'pr' }}

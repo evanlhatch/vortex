@@ -12,12 +12,14 @@ from bench_orchestrator.config import Benchmark, Engine, Format
 from bench_orchestrator.matrix import (
     DEFAULTS,
     BenchmarkDef,
+    BenchmarkGroup,
     Profile,
     Storage,
     all_targets,
     defaults,
     df,
     duck,
+    pr_full,
     resolve_matrix,
 )
 from typer.testing import CliRunner
@@ -50,7 +52,7 @@ def test_resolver_emits_the_fields_consumed_by_the_workflow() -> None:
         scale_factor=1,
         iterations=10,
         local_dir="data/tpch",
-        remote_storage="s3://bucket/tpch/1.0/",
+        remote_key="tpch/1.0",
     )
 
     [entry] = resolve_matrix(Profile(targets=all_targets), [benchmark])
@@ -69,27 +71,39 @@ def test_resolver_emits_the_fields_consumed_by_the_workflow() -> None:
         "scale_factor": "1",
         "iterations": "10",
         "local_dir": "data/tpch",
-        "remote_storage": "s3://bucket/tpch/1.0/",
+        "remote_key": "tpch/1.0",
     }
 
 
 def test_ci_profiles_have_distinct_and_consistent_roles() -> None:
-    assert set(PROFILES) == {"develop", "pr", "nightly"}
-    regular_ids = {benchmark.id for benchmark in BENCHMARKS if not benchmark.nightly}
-    nightly_ids = {benchmark.id for benchmark in BENCHMARKS if benchmark.nightly}
+    assert set(PROFILES) == {"develop", "pr", "pr-full", "nightly", "vortex"}
+    regular_ids = {benchmark.id for benchmark in BENCHMARKS if benchmark.group is BenchmarkGroup.REGULAR}
+    nightly_ids = {benchmark.id for benchmark in BENCHMARKS if benchmark.group is BenchmarkGroup.NIGHTLY}
     develop = {entry["id"]: entry for entry in resolve_matrix(PROFILES["develop"], BENCHMARKS)}
     pr = {entry["id"]: entry for entry in resolve_matrix(PROFILES["pr"], BENCHMARKS)}
+    pr_full_matrix = {entry["id"]: entry for entry in resolve_matrix(PROFILES["pr-full"], BENCHMARKS)}
     nightly = {entry["id"]: entry for entry in resolve_matrix(PROFILES["nightly"], BENCHMARKS)}
+    vortex = resolve_matrix(PROFILES["vortex"], BENCHMARKS)
 
     assert set(develop) == regular_ids
-    assert set(pr) == regular_ids
+    assert set(pr_full_matrix) == regular_ids
+    assert set(pr) == regular_ids - {"appian-nvme", "tpch-s3-10"}
     assert set(nightly) == nightly_ids
+    assert [entry["id"] for entry in vortex] == ["vortex-queries"]
+    assert develop["tpch-s3"]["remote_key"] == "tpch/1.0"
+    assert nightly["tpch-s3"]["remote_key"] == "tpch/100.0"
+    assert "${{" not in json.dumps([*develop.values(), *pr.values(), *pr_full_matrix.values(), *nightly.values()])
 
-    default_targets = set(DEFAULTS)
-    for entry in (*pr.values(), *nightly.values()):
+    default_targets = {(target.engine, target.format) for target in DEFAULTS}
+    pr_targets = default_targets | {(Engine.DATAFUSION, Format.ARROW)}
+    for entry in pr.values():
         targets = {(Engine(target["engine"]), Format(target["format"])) for target in _targets(entry)}
         assert targets
-        assert targets <= {(target.engine, target.format) for target in default_targets}
+        assert targets <= pr_targets
+    for entry in nightly.values():
+        targets = {(Engine(target["engine"]), Format(target["format"])) for target in _targets(entry)}
+        assert targets
+        assert targets <= default_targets
 
     tpch = develop["tpch-nvme"]
     assert [(target["engine"], target["format"]) for target in _targets(tpch)] == [
@@ -103,6 +117,28 @@ def test_ci_profiles_have_distinct_and_consistent_roles() -> None:
         ("duckdb", "vortex-compact"),
         ("duckdb", "duckdb"),
     ]
+
+    assert [(target["engine"], target["format"]) for target in _targets(pr_full_matrix["clickbench-nvme"])] == [
+        ("datafusion", "parquet"),
+        ("datafusion", "vortex"),
+        ("duckdb", "parquet"),
+        ("duckdb", "vortex"),
+        ("duckdb", "duckdb"),
+    ]
+    assert pr_full_matrix["clickbench-nvme"]["data_formats"] == [
+        "parquet",
+        "vortex",
+        "vortex-compact",
+        "duckdb",
+    ]
+    assert [(target["engine"], target["format"]) for target in _targets(pr["tpch-nvme"])] == [
+        ("datafusion", "arrow"),
+        ("datafusion", "parquet"),
+        ("datafusion", "vortex"),
+        ("duckdb", "parquet"),
+        ("duckdb", "vortex"),
+    ]
+    assert all(target["format"] != "lance" for entry in pr_full_matrix.values() for target in _targets(entry))
 
 
 def test_existing_display_and_scale_values_are_preserved() -> None:
@@ -125,3 +161,15 @@ def test_matrix_command_emits_json_and_rejects_unknown_profiles() -> None:
 
     result = runner.invoke(cli_module.app, ["matrix", "does-not-exist"])
     assert result.exit_code == 1
+
+
+def test_pr_full_policy_honors_benchmark_override() -> None:
+    benchmark = BenchmarkDef(
+        id="override",
+        benchmark=Benchmark.APPIAN,
+        name="Override",
+        targets=df(Format.PARQUET, Format.VORTEX, Format.LANCE),
+        pr_targets=df(Format.VORTEX),
+    )
+
+    assert pr_full(benchmark) == df(Format.VORTEX)

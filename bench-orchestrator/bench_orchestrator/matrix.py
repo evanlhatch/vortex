@@ -24,6 +24,14 @@ class Storage(Enum):
         return "NVME" if self is Storage.NVME else "S3"
 
 
+class BenchmarkGroup(Enum):
+    """A separately scheduled group of benchmark definitions."""
+
+    REGULAR = "regular"
+    NIGHTLY = "nightly"
+    VORTEX = "vortex"
+
+
 def _dedupe(targets: Iterable[BenchmarkTarget]) -> tuple[BenchmarkTarget, ...]:
     """Normalize and de-duplicate targets, preserving first-seen order."""
     return tuple(dict.fromkeys(target.normalized() for target in targets))
@@ -100,9 +108,11 @@ class BenchmarkDef:
     storage: Storage = Storage.NVME
     scale_factor: float | int | None = None
     iterations: int | None = None
-    nightly: bool = False
+    group: BenchmarkGroup = BenchmarkGroup.REGULAR
+    pr_targets: TargetSet | None = None
+    pr_base: bool = True
     local_dir: str | None = None
-    remote_storage: str | None = None
+    remote_key: str | None = None
 
     @property
     def subcommand(self) -> str:
@@ -111,6 +121,7 @@ class BenchmarkDef:
 
 
 TargetPolicy = Callable[[BenchmarkDef], TargetSet]
+BenchmarkPolicy = Callable[[BenchmarkDef], bool]
 
 
 def all_targets(benchmark: BenchmarkDef) -> TargetSet:
@@ -123,12 +134,39 @@ def defaults(benchmark: BenchmarkDef) -> TargetSet:
     return TargetSet(tuple(target for target in benchmark.targets if target in DEFAULTS.targets))
 
 
+def pr_full(benchmark: BenchmarkDef) -> TargetSet:
+    """Return the full target set supported by pull-request runners."""
+    if benchmark.pr_targets is not None:
+        return benchmark.pr_targets
+    return TargetSet(tuple(target for target in benchmark.targets if target.format is not Format.LANCE))
+
+
+def pr_defaults(benchmark: BenchmarkDef) -> TargetSet:
+    """Return the cheap PR lane while preserving Arrow coverage for regular TPC-H."""
+    allowed = set(DEFAULTS)
+    if benchmark.benchmark is Benchmark.TPCH:
+        allowed.update(df(Format.ARROW))
+    return TargetSet(tuple(target for target in pr_full(benchmark) if target in allowed))
+
+
+def all_benchmarks(_: BenchmarkDef) -> bool:
+    """Include every benchmark in a profile's group."""
+    return True
+
+
+def pr_base_benchmarks(benchmark: BenchmarkDef) -> bool:
+    """Include benchmarks assigned to the cheaper PR lane."""
+    return benchmark.pr_base
+
+
 @dataclass(frozen=True)
 class Profile:
     """A named CI benchmark configuration."""
 
-    nightly: bool = False
+    group: BenchmarkGroup = BenchmarkGroup.REGULAR
+    benchmarks: BenchmarkPolicy = all_benchmarks
     targets: TargetPolicy = all_targets
+    data_formats: TargetPolicy | None = None
     description: str = ""
 
 
@@ -145,14 +183,14 @@ def _data_formats(target_set: TargetSet) -> list[Format]:
     return [fmt for fmt in _FORMAT_ORDER if fmt in present and fmt not in _NOT_GENERATED]
 
 
-def _matrix_entry(benchmark: BenchmarkDef, run_targets: TargetSet) -> dict[str, object]:
+def _matrix_entry(benchmark: BenchmarkDef, run_targets: TargetSet, data_format_targets: TargetSet) -> dict[str, object]:
     """Build one GitHub Actions ``include`` entry."""
     entry: dict[str, object] = {
         "id": benchmark.id,
         "subcommand": benchmark.subcommand,
         "name": benchmark.name,
         "targets": [target.to_dict() for target in run_targets],
-        "data_formats": [fmt.value for fmt in _data_formats(run_targets)],
+        "data_formats": [fmt.value for fmt in _data_formats(data_format_targets)],
     }
     if benchmark.scale_factor is not None:
         entry["scale_factor"] = str(benchmark.scale_factor)
@@ -160,8 +198,8 @@ def _matrix_entry(benchmark: BenchmarkDef, run_targets: TargetSet) -> dict[str, 
         entry["iterations"] = str(benchmark.iterations)
     if benchmark.local_dir is not None:
         entry["local_dir"] = benchmark.local_dir
-    if benchmark.remote_storage is not None:
-        entry["remote_storage"] = benchmark.remote_storage
+    if benchmark.remote_key is not None:
+        entry["remote_key"] = benchmark.remote_key
     return entry
 
 
@@ -169,10 +207,13 @@ def resolve_matrix(profile: Profile, benchmarks: Iterable[BenchmarkDef]) -> list
     """Resolve a profile into GitHub Actions matrix entries."""
     entries: list[dict[str, object]] = []
     for benchmark in benchmarks:
-        if benchmark.nightly != profile.nightly:
+        if benchmark.group is not profile.group or not profile.benchmarks(benchmark):
             continue
         run_targets = _valid_for_storage(profile.targets(benchmark), benchmark.storage)
         if len(run_targets) == 0:
             continue
-        entries.append(_matrix_entry(benchmark, run_targets))
+        data_format_targets = run_targets
+        if profile.data_formats is not None:
+            data_format_targets = _valid_for_storage(profile.data_formats(benchmark), benchmark.storage)
+        entries.append(_matrix_entry(benchmark, run_targets, data_format_targets))
     return entries
