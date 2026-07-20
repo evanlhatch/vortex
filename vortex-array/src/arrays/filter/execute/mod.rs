@@ -37,6 +37,7 @@ mod decimal;
 mod fixed_size_list;
 mod listview;
 mod primitive;
+mod simd_compress;
 mod slice;
 mod struct_;
 pub mod take;
