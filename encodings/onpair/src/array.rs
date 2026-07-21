@@ -276,6 +276,38 @@ impl OnPair {
         uncompressed_lengths: ArrayRef,
         validity: Validity,
     ) -> VortexResult<OnPairArray> {
+        Self::try_new_with_data(
+            dtype,
+            OnPairData::new(dict_bytes, uncompressed_lengths.len()),
+            dict_offsets,
+            codes,
+            codes_offsets,
+            uncompressed_lengths,
+            validity,
+        )
+    }
+
+    /// Build an [`OnPairArray`] from already-materialised parts while reusing
+    /// an existing [`OnPairData`].
+    ///
+    /// Reusing the data preserves the dictionary byte-buffer handle and the
+    /// shared memoized dictionary offsets. This is useful when recursive
+    /// compression replaces the slot children without changing the logical
+    /// dictionary.
+    ///
+    /// If `data` contains memoized dictionary offsets, `dict_offsets` must be
+    /// logically equivalent to the offsets used to populate that cache. The
+    /// constructor intentionally does not validate the dictionary itself;
+    /// dictionary validation remains lazy and is performed on first use.
+    pub fn try_new_with_data(
+        dtype: DType,
+        data: OnPairData,
+        dict_offsets: ArrayRef,
+        codes: ArrayRef,
+        codes_offsets: ArrayRef,
+        uncompressed_lengths: ArrayRef,
+        validity: Validity,
+    ) -> VortexResult<OnPairArray> {
         validate_parts(
             &dtype,
             &dict_offsets,
@@ -283,18 +315,16 @@ impl OnPair {
             &codes_offsets,
             &uncompressed_lengths,
         )?;
-        let len = uncompressed_lengths.len();
-        let data = OnPairData::new(dict_bytes, len);
-        let slots = OnPairSlots {
-            dict_offsets,
-            codes,
-            codes_offsets,
-            uncompressed_lengths,
-            validity: validity_to_child(&validity, len),
-        }
-        .into_slots();
         Ok(unsafe {
-            Array::from_parts_unchecked(ArrayParts::new(OnPair, dtype, len, data).with_slots(slots))
+            Self::new_unchecked(
+                dtype,
+                data,
+                dict_offsets,
+                codes,
+                codes_offsets,
+                uncompressed_lengths,
+                validity,
+            )
         })
     }
 

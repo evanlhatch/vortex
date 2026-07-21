@@ -111,9 +111,9 @@ impl Scheme for OnPairScheme {
             exec_ctx,
         )?;
 
-        Ok(OnPair::try_new(
+        Ok(OnPair::try_new_with_data(
             onpair_array.dtype().clone(),
-            onpair_array.dict_bytes_handle().clone(),
+            onpair_array.data().clone(),
             dict_offsets,
             codes,
             codes_offsets,
