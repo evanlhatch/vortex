@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+//! An experimental structural layout for fixed-size-list columns.
+//!
+//! [`FixedSizeListLayout`] decomposes a fixed-size list into independently configurable
+//! `elements` and optional `validity` child layouts. The fixed list size maps outer rows directly
+//! into element ranges, so projections can skip elements belonging exclusively to unselected
+//! leading and trailing rows without storing an offsets child.
+
 mod expr;
 mod reader;
 pub mod writer;

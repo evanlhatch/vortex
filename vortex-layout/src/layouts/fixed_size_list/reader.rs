@@ -8,6 +8,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::try_join;
 use vortex_array::ArrayRef;
+use vortex_array::Canonical;
 use vortex_array::IntoArray;
 use vortex_array::MaskFuture;
 use vortex_array::VortexSessionExecute;
@@ -131,74 +132,142 @@ impl FixedSizeListReader {
         mask: MaskFuture,
     ) -> VortexResult<ArrayFuture> {
         let list_size = u64::from(self.layout.list_size());
-        let nullability = self.layout.dtype().nullability();
         let row_count = usize::try_from(row_range.end - row_range.start)?;
+        let reader = self.clone();
+        let row_range = row_range.clone();
         let rewritten = rewrite_list_length_expr(expr)?;
-        let validity_fut = fetch_validity(
-            self.validity.as_ref(),
-            row_range,
-            MaskFuture::new_true(row_count),
-        )?;
 
         Ok(async move {
-            let validity = validity_fut.await?;
+            let mask = mask.await?;
+            let validity_mask = if mask.all_true() {
+                MaskFuture::new_true(row_count)
+            } else {
+                MaskFuture::ready(mask.clone())
+            };
+            let validity =
+                fetch_validity(reader.validity.as_ref(), &row_range, validity_mask)?.await?;
+
+            let nullability = reader.layout.dtype().nullability();
             let lengths = ConstantArray::new(list_size, row_count)
                 .into_array()
                 .cast(DType::Primitive(PType::U64, nullability))?;
-            let lengths = apply_validity(lengths, validity, nullability)?;
-
-            let mask = mask.await?;
             let lengths = if mask.all_true() {
                 lengths
             } else {
                 lengths.filter(mask)?
             };
+            let lengths = apply_validity(lengths, validity, nullability)?;
             lengths.apply(&rewritten)
         }
         .boxed())
     }
 
-    fn project_elements(
+    /// Projection for [`FixedSizeListChildrenNeeded::Elements`].
+    ///
+    /// An all-true mask over the full local range reads every child concurrently. Otherwise, the
+    /// read is bounded to the first and last selected fixed-size list.
+    fn project_all(
         &self,
         row_range: &Range<u64>,
         expr: &Expression,
         mask: MaskFuture,
     ) -> VortexResult<ArrayFuture> {
+        let is_full_range = row_range.start == 0 && row_range.end == self.layout.row_count();
         let reader = self.clone();
-        let expr = expr.clone();
         let row_range = row_range.clone();
+        let expr = expr.clone();
 
         Ok(async move {
-            let row_count = usize::try_from(row_range.end - row_range.start)?;
-            let list_size = u64::from(reader.layout.list_size());
-            let elements_range = element_range(&row_range, list_size)?;
-            let elements_len = usize::try_from(elements_range.end - elements_range.start)?;
-
-            let elements_fut = reader.elements.projection_evaluation(
-                &elements_range,
-                &root(),
-                MaskFuture::new_true(elements_len),
-            )?;
-
-            let validity_fut = fetch_validity(
-                reader.validity.as_ref(),
-                &row_range,
-                MaskFuture::new_true(row_count),
-            )?;
-
-            let (elements, validity) = try_join!(elements_fut, validity_fut)?;
-            let fsl = build_fixed_size_list(elements, validity, reader.layout.dtype(), row_count)?;
-
             let mask = mask.await?;
-            let fsl = if mask.all_true() {
+            if is_full_range && mask.all_true() {
+                reader.project_all_full(&expr)?.await
+            } else {
+                reader.project_all_bounded(&row_range, &expr, mask)?.await
+            }
+        }
+        .boxed())
+    }
+
+    /// Fetch the complete `elements` and `validity` children concurrently.
+    fn project_all_full(&self, expr: &Expression) -> VortexResult<ArrayFuture> {
+        let row_count = usize::try_from(self.layout.row_count())?;
+        let list_size = u64::from(self.layout.list_size());
+        let elements_range = element_range(&(0..self.layout.row_count()), list_size)?;
+        let expr = expr.clone();
+
+        let elements_fut = self.fetch_raw_elements(&elements_range)?;
+        let validity_fut = fetch_validity(
+            self.validity.as_ref(),
+            &(0..self.layout.row_count()),
+            MaskFuture::new_true(row_count),
+        )?;
+
+        let dtype = self.layout.dtype().clone();
+        Ok(async move {
+            let (elements, validity) = try_join!(elements_fut, validity_fut)?;
+            let fsl = build_fixed_size_list(elements, validity, &dtype, row_count)?;
+            fsl.apply(&expr)
+        }
+        .boxed())
+    }
+
+    /// Bounded read for a sub-range or selective mask.
+    ///
+    /// Crops leading and trailing unselected fixed-size lists, maps the cropped row range directly
+    /// into element coordinates, and filters any holes after reconstructing the array.
+    fn project_all_bounded(
+        &self,
+        row_range: &Range<u64>,
+        expr: &Expression,
+        mask: Mask,
+    ) -> VortexResult<ArrayFuture> {
+        let Some(selected_rows) = selected_row_range(&mask) else {
+            let empty = Canonical::empty(self.layout.dtype()).into_array();
+            let expr = expr.clone();
+            return Ok(async move { empty.apply(&expr) }.boxed());
+        };
+
+        let selected_mask = mask.slice(selected_rows.clone());
+        let selected_row_range = (row_range.start + u64::try_from(selected_rows.start)?)
+            ..(row_range.start + u64::try_from(selected_rows.end)?);
+        let row_count = selected_mask.len();
+        let list_size = u64::from(self.layout.list_size());
+        let elements_range = element_range(&selected_row_range, list_size)?;
+        let expr = expr.clone();
+
+        let elements_fut = self.fetch_raw_elements(&elements_range)?;
+        let validity_fut = fetch_validity(
+            self.validity.as_ref(),
+            &selected_row_range,
+            MaskFuture::new_true(row_count),
+        )?;
+        let dtype = self.layout.dtype().clone();
+        Ok(async move {
+            let (elements, validity) = try_join!(elements_fut, validity_fut)?;
+            let fsl = build_fixed_size_list(elements, validity, &dtype, row_count)?;
+
+            let fsl = if selected_mask.all_true() {
                 fsl
             } else {
-                fsl.filter(mask)?
+                fsl.filter(selected_mask)?
             };
             fsl.apply(&expr)
         }
         .boxed())
     }
+
+    /// Fire the elements read for `row_range` in element space.
+    ///
+    /// No mask or expression is applied.
+    fn fetch_raw_elements(&self, row_range: &Range<u64>) -> VortexResult<ArrayFuture> {
+        let row_count = usize::try_from(row_range.end - row_range.start)?;
+        self.elements
+            .projection_evaluation(row_range, &root(), MaskFuture::new_true(row_count))
+    }
+}
+
+fn selected_row_range(mask: &Mask) -> Option<Range<usize>> {
+    Some(mask.first()?..mask.last()? + 1)
 }
 
 impl LayoutReader for FixedSizeListReader {
@@ -319,7 +388,7 @@ impl LayoutReader for FixedSizeListReader {
             FixedSizeListChildrenNeeded::ListLengthAndValidity => {
                 self.project_list_length(row_range, expr, mask)
             }
-            FixedSizeListChildrenNeeded::Elements => self.project_elements(row_range, expr, mask),
+            FixedSizeListChildrenNeeded::Elements => self.project_all(row_range, expr, mask),
         }
     }
 }
@@ -398,6 +467,9 @@ fn predicate_array_to_mask(array: ArrayRef, session: &VortexSession) -> VortexRe
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
     use rstest::rstest;
     use vortex_array::ArrayContext;
     use vortex_array::arrays::BoolArray;
@@ -420,6 +492,7 @@ mod tests {
     use crate::layouts::repartition::RepartitionStrategy;
     use crate::layouts::repartition::RepartitionWriterOptions;
     use crate::scan::split_by::SplitBy;
+    use crate::segments::SegmentFuture;
     use crate::segments::SegmentSource;
     use crate::segments::TestSegments;
     use crate::sequence::SequenceId;
@@ -473,6 +546,18 @@ mod tests {
         .into_array()
     }
 
+    struct CountingSegmentSource {
+        inner: Arc<dyn SegmentSource>,
+        request_count: Arc<AtomicUsize>,
+    }
+
+    impl SegmentSource for CountingSegmentSource {
+        fn request(&self, id: crate::segments::SegmentId) -> SegmentFuture {
+            self.request_count.fetch_add(1, Ordering::Relaxed);
+            self.inner.request(id)
+        }
+    }
+
     #[rstest]
     #[case::non_nullable(false)]
     #[case::nullable(true)]
@@ -524,6 +609,39 @@ mod tests {
 
         let mut exec_ctx = SESSION.create_execution_ctx();
         assert_arrays_eq!(result, expected, &mut exec_ctx);
+        Ok(())
+    }
+
+    #[rstest]
+    #[case::first_row_non_nullable(false, Mask::from_iter([true, false, false, false]), 1)]
+    #[case::first_row_nullable(true, Mask::from_iter([true, false, false, false]), 2)]
+    #[case::no_rows_nullable(true, Mask::new_false(4), 0)]
+    #[tokio::test]
+    async fn projection_sparse_mask_bounds_element_reads(
+        #[case] nullable: bool,
+        #[case] mask: Mask,
+        #[case] expected_requests: usize,
+    ) -> VortexResult<()> {
+        let fsl = create_fsl(nullable);
+        let strategy =
+            FixedSizeListLayoutStrategy::default().with_elements(repartitioned_chunk_strategy(2));
+        let ctx = LayoutReaderContext::new();
+        let (segments, layout) = write_layout_with_strategy(&strategy, fsl.clone()).await?;
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let source = Arc::new(CountingSegmentSource {
+            inner: segments,
+            request_count: Arc::clone(&request_count),
+        });
+        let reader = layout.new_reader("".into(), source, &SESSION, &ctx)?;
+
+        let result = reader
+            .projection_evaluation(&(0..4), &root(), MaskFuture::ready(mask.clone()))?
+            .await?;
+        let expected = fsl.filter(mask)?;
+
+        let mut exec_ctx = SESSION.create_execution_ctx();
+        assert_arrays_eq!(result, expected, &mut exec_ctx);
+        assert_eq!(request_count.load(Ordering::Relaxed), expected_requests);
         Ok(())
     }
 
