@@ -8,7 +8,10 @@ use std::hash::Hasher;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use onpair::CompactDictionary;
 use onpair::CompactDictionaryView;
+use onpair::Dictionary;
+use onpair::DictionaryStorage;
 use prost::Message as _;
 use vortex_array::Array;
 use vortex_array::ArrayEq;
@@ -99,8 +102,11 @@ impl OnPairMetadata {
 
 #[array_slots(OnPair)]
 pub struct OnPairSlots {
-    /// Primitive integer dictionary offsets, length `dict_size + 1`. The
-    /// cascading compressor may re-encode this child independently.
+    /// Recursive dictionary-offset child, with length `dict_size + 1`.
+    ///
+    /// Keeping this as a slot lets the standard Vortex traversal and cascading
+    /// compressor re-encode it independently. The materialised offsets used by
+    /// the runtime dictionary cache are derived from this child on first use.
     pub dict_offsets: ArrayRef,
     /// Primitive integer token codes. Downstream integer compression may
     /// narrow or bit-pack this child independently of the OnPair metadata.
@@ -115,12 +121,40 @@ pub struct OnPairSlots {
     pub validity: Option<ArrayRef>,
 }
 
-/// Inner data for an OnPair-encoded array.
+/// Immutable storage for a materialised OnPair dictionary.
 ///
-/// Holds only the dictionary blob (buffer 0). Every other piece —
-/// `dict_offsets`, the per-token `codes`, the per-row `codes_offsets`, the
-/// per-row `uncompressed_lengths`, and the optional validity child — is a
-/// Vortex slot child so it can be re-encoded by the cascading compressor.
+/// The two buffers remain owned by Vortex. Implementing [`DictionaryStorage`]
+/// this way lets `onpair::CompactDictionary` retain them without copying
+/// either the dictionary bytes or the widened offsets.
+#[derive(Clone, Debug)]
+struct OnPairDictionaryStorage {
+    bytes: ByteBuffer,
+    offsets: Buffer<u32>,
+}
+
+impl DictionaryStorage<u32> for OnPairDictionaryStorage {
+    #[inline]
+    fn bytes(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+
+    #[inline]
+    fn offsets(&self) -> &[u32] {
+        self.offsets.as_slice()
+    }
+}
+
+/// Non-child data for an OnPair-encoded array.
+///
+/// The serialized dictionary bytes stay in buffer 0, while the dictionary
+/// offsets remain a recursive child so the existing on-disk format is
+/// unchanged. Once the offsets are materialised, `dictionary` retains an
+/// upstream storage-backed [`CompactDictionary`] around the same immutable
+/// buffers. Constructing an array from serialized parts does not materialise or
+/// validate the dictionary: Vortex only reconstructs the recursive offset
+/// child at that point. Converting that child to contiguous `u32` offsets and
+/// validating the dictionary are deferred until the first decode/search
+/// operation that needs dictionary token access.
 #[derive(Clone)]
 pub struct OnPairData {
     /// The dictionary blob (buffer 0).
@@ -128,34 +162,32 @@ pub struct OnPairData {
     /// INVARIANT: this buffer is an OnPair compact dictionary byte buffer,
     /// including its trailing read padding.
     dict_bytes: BufferHandle,
-    len: usize,
-    /// The `dict_offsets` child widened to `u32`, memoized on first use so the
-    /// child is decompressed and the dictionary content is validated at most
-    /// once per dictionary — never per operation. (`dict_bytes` needs no such
-    /// cache: it is a raw buffer, so access is already zero-cost.)
+    /// The storage-backed dictionary, memoized after successful initialization.
+    /// Initialization decompresses the child and validates the dictionary;
+    /// once cached, later operations do neither again. The dictionary owns
+    /// clones of the immutable Vortex buffer handles, so this does not copy the
+    /// bytes. A failed validation is not cached, and concurrent first users may
+    /// duplicate initialization work before one value wins the `OnceLock`.
     ///
     /// INVARIANT: once populated, the offsets passed
-    /// [`CompactDictionaryView::validate`] against `dict_bytes` (or came from
-    /// the trainer via [`init_dict_offsets`](Self::init_dict_offsets)), and
-    /// they are the widened values of the array's `dict_offsets` child. The
-    /// `Arc` cell is shared only between arrays with identical `dict_bytes`
-    /// and logically identical `dict_offsets` (slice / filter / cast keep
-    /// both).
-    dict_offsets: Arc<OnceLock<Buffer<u32>>>,
+    /// [`CompactDictionary::validate_storage`] against `dict_bytes` (or came
+    /// from the trainer via [`init_dict_offsets`](Self::init_dict_offsets)).
+    /// The `Arc` cell is shared only between arrays with identical dictionary
+    /// buffers (slice / filter / cast keep both).
+    dictionary: Arc<OnceLock<CompactDictionary<OnPairDictionaryStorage>>>,
 }
 
 impl OnPairData {
-    /// Build [`OnPairData`] from the dictionary blob and the number of rows.
-    pub fn new(dict_bytes: BufferHandle, len: usize) -> Self {
+    /// Build [`OnPairData`] from the dictionary blob.
+    pub fn new(dict_bytes: BufferHandle) -> Self {
         Self {
             dict_bytes,
-            len,
-            dict_offsets: Arc::new(OnceLock::new()),
+            dictionary: Arc::new(OnceLock::new()),
         }
     }
 
-    /// Seed the widened-offsets cell with dictionary offsets that are already
-    /// known to be conformant, so the first operation skips validation.
+    /// Seed the dictionary cell with offsets that are already known to be
+    /// conformant, so the first operation skips validation.
     ///
     /// This is the crate-internal trust mint (the moral equivalent of
     /// [`onpair::CompactDictionary::new_unchecked`]): compression seeds it
@@ -173,18 +205,14 @@ impl OnPairData {
                 .is_ok(),
             "init_dict_offsets called with a non-conformant dictionary"
         );
+        let dictionary = unsafe {
+            CompactDictionary::new_unchecked_storage(OnPairDictionaryStorage {
+                bytes: self.dict_bytes().clone(),
+                offsets,
+            })
+        };
         // A benign race can only ever install another conformant value.
-        drop(self.dict_offsets.set(offsets));
-    }
-
-    /// Number of rows in the array.
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Whether the array has zero rows.
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
+        drop(self.dictionary.set(dictionary));
     }
 
     /// The dictionary blob as a host byte buffer.
@@ -200,48 +228,42 @@ impl OnPairData {
 
 /// A conformant [`CompactDictionaryView`] over `array`'s dictionary.
 ///
-/// The first call per dictionary widens the `dict_offsets` child to `u32` and
-/// validates the dictionary content; both results are memoized in
-/// [`OnPairData`], so subsequent calls — including on arrays derived by
-/// slice / filter / cast, which share the cell — pay neither cost again.
+/// The first successful initialization widens the `dict_offsets` child and
+/// validates the dictionary content; the resulting storage-backed dictionary
+/// is memoized in [`OnPairData`]. Once cached, subsequent calls — including on
+/// arrays derived by slice / filter / cast, which share the cell — pay neither
+/// cost again.
 pub(crate) fn dict_view<'a>(
     array: ArrayView<'a, OnPair>,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<CompactDictionaryView<'a>> {
     let data = array.data();
-    let offsets = match data.dict_offsets.get() {
-        Some(offsets) => offsets,
+    let dictionary = match data.dictionary.get() {
+        Some(dictionary) => dictionary,
         None => {
+            // TODO(francesco): retain a narrower offset buffer once upstream
+            // CompactDictionary supports typed dictionary offsets.
             let widened = collect_widened::<u32>(array.dict_offsets(), ctx)?;
-            CompactDictionaryView::validate(data.dict_bytes().as_slice(), widened.as_slice())
-                .map_err(|e| vortex_err!(InvalidArgument: "Invalid OnPair dictionary: {e}"))?;
-            data.dict_offsets.get_or_init(|| widened)
+            let dictionary = CompactDictionary::validate_storage(OnPairDictionaryStorage {
+                bytes: data.dict_bytes().clone(),
+                offsets: widened,
+            })
+            .map_err(|e| vortex_err!(InvalidArgument: "Invalid OnPair dictionary: {e}"))?;
+            data.dictionary.get_or_init(|| dictionary)
         }
     };
-    // SAFETY: the cell only ever holds offsets that satisfy the compact
-    // dictionary invariants against this `dict_bytes` (validated above, or
-    // guaranteed by `init_dict_offsets`'s contract), and both buffers are
-    // immutable.
-    Ok(unsafe {
-        CompactDictionaryView::new_unchecked(data.dict_bytes().as_slice(), offsets.as_slice())
-    })
+    Ok(dictionary.as_view())
 }
 
 impl Display for OnPairData {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "len: {}, dict_bytes_len: {}",
-            self.len,
-            self.dict_bytes.len()
-        )
+        write!(f, "dict_bytes_len: {}", self.dict_bytes.len())
     }
 }
 
 impl Debug for OnPairData {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OnPairData")
-            .field("len", &self.len)
             .field("dict_bytes_len", &self.dict_bytes.len())
             .finish()
     }
@@ -278,7 +300,7 @@ impl OnPair {
     ) -> VortexResult<OnPairArray> {
         Self::try_new_with_data(
             dtype,
-            OnPairData::new(dict_bytes, uncompressed_lengths.len()),
+            OnPairData::new(dict_bytes),
             dict_offsets,
             codes,
             codes_offsets,
@@ -291,13 +313,12 @@ impl OnPair {
     /// an existing [`OnPairData`].
     ///
     /// Reusing the data preserves the dictionary byte-buffer handle and the
-    /// shared memoized dictionary offsets. This is useful when recursive
-    /// compression replaces the slot children without changing the logical
-    /// dictionary.
+    /// shared lazy dictionary cache. This is useful when recursive compression
+    /// replaces the slot children without changing the logical dictionary.
     ///
-    /// If `data` contains memoized dictionary offsets, `dict_offsets` must be
-    /// logically equivalent to the offsets used to populate that cache. The
-    /// constructor intentionally does not validate the dictionary itself;
+    /// If `data` contains a memoized dictionary, `dict_offsets` must be
+    /// logically equivalent to the offsets used to create that dictionary.
+    /// The constructor intentionally does not validate the dictionary itself;
     /// dictionary validation remains lazy and is performed on first use.
     pub fn try_new_with_data(
         dtype: DType,
@@ -329,16 +350,16 @@ impl OnPair {
     }
 
     /// Build an [`OnPairArray`] without validation, carrying `data` — and with
-    /// it the memoized widened `dict_offsets` — from an existing array.
+    /// it the memoized dictionary — from an existing array.
     ///
     /// # Safety
     /// The parts must satisfy the same invariants [`try_new`](Self::try_new)
-    /// checks. If `data`'s widened-offsets cell is populated (or shared with a
-    /// live array), `dict_offsets` must hold the same logical offsets the cell
+    /// checks. If `data`'s dictionary cell is populated (or shared with a live
+    /// array), `dict_offsets` must hold the same logical offsets the dictionary
     /// was built from.
     pub(crate) unsafe fn new_unchecked(
         dtype: DType,
-        mut data: OnPairData,
+        data: OnPairData,
         dict_offsets: ArrayRef,
         codes: ArrayRef,
         codes_offsets: ArrayRef,
@@ -346,7 +367,6 @@ impl OnPair {
         validity: Validity,
     ) -> OnPairArray {
         let len = uncompressed_lengths.len();
-        data.len = len;
         let slots = OnPairSlots {
             dict_offsets,
             codes,
@@ -407,7 +427,7 @@ impl VTable for OnPair {
 
     fn validate(
         &self,
-        data: &Self::TypedArrayData,
+        _data: &Self::TypedArrayData,
         dtype: &DType,
         len: usize,
         slots: &[Option<ArrayRef>],
@@ -422,9 +442,6 @@ impl VTable for OnPair {
         )?;
         if s.uncompressed_lengths.len() != len {
             vortex_bail!(InvalidArgument: "uncompressed_lengths must have same len as outer array");
-        }
-        if data.len != len {
-            vortex_bail!(InvalidArgument: "OnPairData len {} != outer len {}", data.len, len);
         }
         Ok(())
     }
@@ -459,10 +476,10 @@ impl VTable for OnPair {
         );
         let mut data = array.data().clone();
         data.dict_bytes = buffers[0].clone();
-        // The replacement blob may differ from the one the memoized offsets
-        // were validated against, so drop the (shared) cell rather than
+        // The replacement blob may differ from the one the memoized dictionary
+        // was validated against, so drop the (shared) cell rather than
         // carry a claim we can no longer prove.
-        data.dict_offsets = Arc::new(OnceLock::new());
+        data.dictionary = Arc::new(OnceLock::new());
         Ok(
             ArrayParts::new(self.clone(), array.dtype().clone(), array.len(), data)
                 .with_slots(array.slots().iter().cloned().collect()),
@@ -549,7 +566,7 @@ impl VTable for OnPair {
             other => vortex_bail!(InvalidArgument: "Expected 4 or 5 children, got {other}"),
         };
 
-        let data = OnPairData::new(buffers[0].clone(), len);
+        let data = OnPairData::new(buffers[0].clone());
         let slots = OnPairSlots {
             dict_offsets,
             codes,
