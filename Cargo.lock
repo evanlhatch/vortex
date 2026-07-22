@@ -10304,6 +10304,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "rstest",
+ "rustix",
  "smol",
  "tempfile",
  "tokio",

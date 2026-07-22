@@ -145,12 +145,11 @@ int vx_cuda_scan_path_arrow_device_stream_batch_rows(const vx_session *session,
  * `vx_cuda_scan_path_arrow_device_stream`. Pass NULL or a zero-initialized options struct to use
  * buffered file I/O and layout-derived batch splitting.
  */
-int vx_cuda_scan_path_arrow_device_stream_with_options(
-    const vx_session *session,
-    vx_view path,
-    const vx_cuda_scan_options *options,
-    struct ArrowDeviceArrayStream *out_stream,
-    vx_error **error_out);
+int vx_cuda_scan_path_arrow_device_stream_with_options(const vx_session *session,
+                                                       vx_view path,
+                                                       const vx_cuda_scan_options *options,
+                                                       struct ArrowDeviceArrayStream *out_stream,
+                                                       vx_error **error_out);
 
 /**
  * Export a borrowed Vortex array for cuDF's Arrow Device import path.
