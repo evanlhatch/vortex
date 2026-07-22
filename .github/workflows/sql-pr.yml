@@ -50,6 +50,7 @@ jobs:
       mode: "pr"
       pr_number: ${{ inputs.pr_number }}
       benchmark_profile: "full"
+      experimental_skip_index: true
       benchmark_matrix: |
         [
           {

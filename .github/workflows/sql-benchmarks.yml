@@ -14,6 +14,10 @@ on:
         required: false
         type: string
         default: ""
+      experimental_skip_index:
+        required: false
+        type: boolean
+        default: false
       benchmark_matrix:
         required: false
         type: string
@@ -535,9 +539,9 @@ jobs:
     timeout-minutes: 120
     env:
       VORTEX_EXPERIMENTAL_PATCHED_ARRAY: "1"
-      VORTEX_EXPERIMENTAL_SKIP_INDEX: "1"
-      VORTEX_EXPERIMENTAL_SKIP_INDEX_DIAGNOSTICS: "1"
-      VORTEX_EXPERIMENTAL_SKIP_INDEX_DIR: "vortex-file-skipping"
+      VORTEX_EXPERIMENTAL_SKIP_INDEX: ${{ inputs.experimental_skip_index && '1' || '' }}
+      VORTEX_EXPERIMENTAL_SKIP_INDEX_DIAGNOSTICS: ${{ inputs.experimental_skip_index && '1' || '' }}
+      VORTEX_EXPERIMENTAL_SKIP_INDEX_DIR: ${{ inputs.experimental_skip_index && 'vortex-file-skipping' || '' }}
       VORTEX_EXPERIMENTAL_NGRAM_BYTES: "16384"
       VORTEX_EXPERIMENTAL_NGRAM_HASHES: "5"
       VORTEX_EXPERIMENTAL_NGRAM_ZONE_LEN: ${{ startsWith(matrix.id, 'fineweb') && '1024' || '8192' }}
