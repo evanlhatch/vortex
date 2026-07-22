@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "vortex.h"
@@ -76,6 +77,18 @@ vx_array_sink *vx_cuda_array_sink_open_file(const vx_session *session,
                                             vx_error **error_out);
 
 /**
+ * Open a CUDA-readable Vortex file sink with fixed-size row blocks.
+ *
+ * `batch_rows` controls the row granularity of CUDA-flat data blocks. Pass zero to use the default
+ * writer strategy of `vx_cuda_array_sink_open_file`.
+ */
+vx_array_sink *vx_cuda_array_sink_open_file_with_batch_rows(const vx_session *session,
+                                                            vx_view path,
+                                                            const vx_dtype *dtype,
+                                                            size_t batch_rows,
+                                                            vx_error **error_out);
+
+/**
  * Scan a local CUDA-compatible Vortex file as an Arrow C Device stream.
  *
  * Files written by `vx_cuda_array_sink_open_file` are compatible with this path. Reusing the same
@@ -89,6 +102,19 @@ int vx_cuda_scan_path_arrow_device_stream(const vx_session *session,
                                           vx_view path,
                                           struct ArrowDeviceArrayStream *out_stream,
                                           vx_error **error_out);
+
+/**
+ * Scan a local CUDA-compatible Vortex file with fixed-size row batches.
+ *
+ * `batch_rows` controls the number of rows in each output `ArrowDeviceArray`. Pass zero to use the
+ * layout-derived splitting of `vx_cuda_scan_path_arrow_device_stream`.
+ */
+int vx_cuda_scan_path_arrow_device_stream_with_batch_rows(
+    const vx_session *session,
+    vx_view path,
+    size_t batch_rows,
+    struct ArrowDeviceArrayStream *out_stream,
+    vx_error **error_out);
 
 /**
  * Export a borrowed Vortex array for cuDF's Arrow Device import path.

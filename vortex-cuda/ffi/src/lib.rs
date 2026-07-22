@@ -20,6 +20,7 @@ use vortex::error::vortex_ensure;
 use vortex::file::OpenOptionsSessionExt;
 use vortex::file::WriteStrategyBuilder;
 use vortex::io::runtime::BlockingRuntime;
+use vortex::layout::scan::split_by::SplitBy;
 use vortex::session::SessionExt;
 use vortex::session::VortexSession;
 use vortex_cuda::CudaOpenOptionsExt;
@@ -98,13 +99,38 @@ pub unsafe extern "C-unwind" fn vx_cuda_array_sink_open_file(
     dtype: *const vx_dtype,
     error_out: *mut *mut vx_error,
 ) -> *mut vx_array_sink {
+    unsafe { vx_cuda_array_sink_open_file_with_batch_rows(session, path, dtype, 0, error_out) }
+}
+
+/// Open a CUDA-readable Vortex file sink with fixed-size row blocks.
+///
+/// `batch_rows` controls the row granularity of CUDA-flat data blocks. Passing zero preserves the
+/// default writer strategy used by [`vx_cuda_array_sink_open_file`].
+///
+/// # Safety
+///
+/// `session`, `path`, and `dtype` must satisfy the same requirements as
+/// `vx_array_sink_open_file`. If `error_out` is non-null, it must be valid for writing one error
+/// pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn vx_cuda_array_sink_open_file_with_batch_rows(
+    session: *const vx_session,
+    path: vx_view,
+    dtype: *const vx_dtype,
+    batch_rows: usize,
+    error_out: *mut *mut vx_error,
+) -> *mut vx_array_sink {
     try_or(error_out, ptr::null_mut(), || {
         session_with_cuda(unsafe { vx_session_ref(session) }?)?;
-        let strategy = WriteStrategyBuilder::default()
+        let mut strategy = WriteStrategyBuilder::default()
             .with_btrblocks_builder(BtrBlocksCompressorBuilder::default().only_cuda_compatible())
-            .with_flat_strategy(Arc::new(CudaFlatLayoutStrategy::default()))
-            .build();
-        unsafe { vx_array_sink_open_file_with_strategy(session, path, dtype, strategy) }
+            .with_flat_strategy(Arc::new(CudaFlatLayoutStrategy::default()));
+        if batch_rows > 0 {
+            strategy = strategy
+                .with_row_block_size(batch_rows)
+                .with_data_block_size_target(None);
+        }
+        unsafe { vx_array_sink_open_file_with_strategy(session, path, dtype, strategy.build()) }
     })
 }
 
@@ -136,6 +162,31 @@ pub unsafe extern "C-unwind" fn vx_cuda_scan_path_arrow_device_stream(
     out_stream: *mut ArrowDeviceArrayStream,
     error_out: *mut *mut vx_error,
 ) -> c_int {
+    unsafe {
+        vx_cuda_scan_path_arrow_device_stream_with_batch_rows(
+            session, path, 0, out_stream, error_out,
+        )
+    }
+}
+
+/// Scan a local Vortex file and export an Arrow C Device stream with fixed-size row batches.
+///
+/// `batch_rows` controls the number of rows in each output batch. Passing zero preserves the
+/// layout-derived splitting used by [`vx_cuda_scan_path_arrow_device_stream`].
+///
+/// # Safety
+///
+/// `session` must be a valid borrowed handle created by `vortex-ffi`. `path` must be valid for the
+/// duration of this call and contain UTF-8. `out_stream` must be a valid writable pointer. If
+/// `error_out` is non-null, it must be valid for writing one error pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn vx_cuda_scan_path_arrow_device_stream_with_batch_rows(
+    session: *const vx_session,
+    path: vx_view,
+    batch_rows: usize,
+    out_stream: *mut ArrowDeviceArrayStream,
+    error_out: *mut *mut vx_error,
+) -> c_int {
     try_or(error_out, VX_CUDA_ERR, || {
         vortex_ensure!(!out_stream.is_null(), "null ArrowDeviceArrayStream output");
 
@@ -143,7 +194,13 @@ pub unsafe extern "C-unwind" fn vx_cuda_scan_path_arrow_device_stream(
         let session = session_with_cuda(unsafe { vx_session_ref(session) }?)?;
         let array_stream = ffi_runtime().block_on(async {
             let file = session.open_options().with_cuda().open_path(path).await?;
-            Ok::<_, vortex::error::VortexError>(file.scan()?.into_array_stream()?.boxed())
+            let scan = file.scan()?;
+            let scan = if batch_rows == 0 {
+                scan
+            } else {
+                scan.with_split_by(SplitBy::RowCount(batch_rows))
+            };
+            Ok::<_, vortex::error::VortexError>(scan.into_array_stream()?.boxed())
         })?;
         let device_stream = array_stream.export_device_array_stream(&session, ffi_runtime())?;
 
