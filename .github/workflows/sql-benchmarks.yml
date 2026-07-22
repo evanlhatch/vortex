@@ -589,7 +589,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ inputs.mode }}" = "pr" ]; then
-            targets='[{"engine":"datafusion","format":"vortex"}]'
+            targets='${{ toJSON(matrix.pr_targets) }}'
           else
             targets='${{ toJSON(matrix.develop_targets) }}'
           fi
