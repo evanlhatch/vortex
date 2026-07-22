@@ -17,6 +17,10 @@ on:
         required: false
         type: string
         default: "base"
+      pr_number:
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       benchmark_profile:
@@ -27,6 +31,11 @@ on:
         options:
           - "base"
           - "full"
+      pr_number:
+        description: "PR number for benchmark result comments"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -39,6 +48,7 @@ jobs:
     secrets: inherit
     with:
       mode: "pr"
+      pr_number: ${{ inputs.pr_number }}
       benchmark_profile: "full"
       benchmark_matrix: |
         [

@@ -10,6 +10,10 @@ on:
         required: false
         type: string
         default: i7i.metal-24xl
+      pr_number:
+        required: false
+        type: string
+        default: ""
       benchmark_matrix:
         required: false
         type: string
@@ -712,6 +716,7 @@ jobs:
         uses: thollander/actions-comment-pull-request@24bffb9b452ba05a4f3f77933840a6a841d1b32b  # v3
         with:
           file-path: comment.md
+          pr-number: ${{ inputs.pr_number || github.event.pull_request.number }}
           # There is exactly one comment per comment-tag. If a comment with this tag already exists,
           # this action will *update* the comment instead of posting a new comment.
           comment-tag: bench-pr-comment-${{ matrix.id }}
@@ -724,6 +729,7 @@ jobs:
             # 🚨🚨🚨❌❌❌ SQL BENCHMARK FAILED ❌❌❌🚨🚨🚨
 
             Benchmark `${{ matrix.name }}` (${{ inputs.benchmark_profile }}) failed! Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+          pr-number: ${{ inputs.pr_number || github.event.pull_request.number }}
           comment-tag: bench-pr-comment-${{ matrix.id }}
 
       - name: Upload Benchmark Results
