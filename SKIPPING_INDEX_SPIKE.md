@@ -67,8 +67,61 @@ its dictionary, compressor, coalescing, or flat-layout stages:
 
 The benchmark artifact is written to a separate `vortex-file-skipping` directory so cached normal
 Vortex files cannot contaminate the comparison. The focused draft-PR run covers ClickBench,
-ClickBench sorted, FineWeb NVMe, and FineWeb S3 with DataFusion/Vortex. Results will be recorded here
-after the dedicated benchmark run completes.
+ClickBench sorted, FineWeb NVMe, and FineWeb S3. Each candidate job times unchanged
+DataFusion/Parquet alongside indexed DataFusion/Vortex, and the reporting harness subtracts the
+Parquet control shift from the attributed Vortex impact. The controlled run is
+[29951570194](https://github.com/vortex-data/vortex/actions/runs/29951570194).
+
+| Suite | Vortex PR/base | Parquet control | Attributed Vortex impact | Indexed Vortex size | Verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| ClickBench NVMe | 1.004x | 1.014x | -1.0% | +4.3% | No suite-wide signal |
+| ClickBench sorted NVMe | 0.944x | 0.991x | -4.8% | +2.9% | No clear signal; noisy |
+| FineWeb NVMe | 1.125x | 1.039x | +8.3% | +3.3% | No clear suite-wide signal; indexed queries regress |
+| FineWeb S3 | 1.057x | 0.984x | +7.5% | not captured | No clear signal; environment noisy |
+
+The equality result does materialize in a real benchmark. ClickBench q19 is the indexed
+`UserID = 435090932899640449` point lookup. It improves from 29.23 ms to 21.42 ms, a raw 27%
+reduction. The matching unchanged Parquet query moves from 28.17 ms to 27.45 ms, so the
+control-adjusted Vortex ratio is approximately `0.73 / 0.97 = 0.75`: **about 25% faster, or
+1.33x**. The diagnostic mask explains the timing: one scan examines 12,299 zones across 100 files,
+proves 12,294 absent, and keeps only five. The entire 43-query ClickBench suite remains neutral
+because the other queries cannot use this point-lookup index. The +4.3% file-size cost includes the
+`UserID` bloom and two larger trigram indexes, so it is not the isolated equality-index overhead.
+The full tables are in the
+[ClickBench benchmark comment](https://github.com/vortex-data/vortex/pull/8907#issuecomment-5050548603).
+
+The trigram result is negative. FineWeb's one 1,023-zone table produced these masks:
+
+| Predicate | Indexed column | Zones pruned | Average fill |
+| --- | --- | ---: | ---: |
+| `url LIKE '%google%'` | `url` | 21/1,023 | 35.4% |
+| `text LIKE '%Google%'` | `text` | 0/1,023 | 79.9% |
+| `text LIKE '% vortex %'` | `text` | 0/1,023 | 79.9% |
+| `url LIKE '%espn%'` | `url` | 328/1,023 | 35.4% |
+| `url LIKE '%www.espn.go.com%'` | `url` | 625/1,023 | 35.4% |
+| `url LIKE '%espn.go.com%'` | `url` | 607/1,023 | 35.4% |
+| `file_path LIKE '%/CC-MAIN-2014-%'` | `file_path` | 0/1,023 | 5.6% |
+
+Despite real pruning, every trigram-targeted FineWeb query is slower after its matching Parquet
+control adjustment. On NVMe the adjusted costs are approximately +21% for q3, +3% for q5, +10%
+for q6, +25% for q7, and +36% for q8. On S3 they are approximately +13%, +28%, +15%, +19%, and
++27%. The 16 KiB text filter is nearly saturated, while the low-fill `file_path` case shows a
+different weakness: all of the common three-byte grams occur somewhere in every zone, even though
+the complete string does not. Reading and probing the index then adds cost without avoiding enough
+data. See the [FineWeb NVMe](https://github.com/vortex-data/vortex/pull/8907#issuecomment-5050536937)
+and [FineWeb S3](https://github.com/vortex-data/vortex/pull/8907#issuecomment-5050543034) reports.
+
+ClickBench q20-q23 and sorted q23 contain the expected `URL`/`Title` substring predicates, but the
+trigram probe executes zero times in both job logs. Their expression arrives in a shape not matched
+by this rewrite, so any timing movement is not evidence for the index. In particular, sorted q23's
+raw 20% improvement cannot be credited to trigram pruning. The
+[sorted report](https://github.com/vortex-data/vortex/pull/8907#issuecomment-5050576221) is retained
+as a useful expression-pushdown gap to investigate.
+
+The SQL harness reports wall time, file size, and the added zone-mask diagnostics, but not
+per-query segment requests or payload bytes. Those I/O counters therefore come from the controlled
+synthetic benchmark above; the real-suite claim is intentionally limited to wall time, file size,
+and zones pruned.
 
 ### Off-the-shelf pieces
 
@@ -118,4 +171,11 @@ data pipeline instead of requiring callers to reconstruct it.
 - The hash algorithm, format version, supported dtypes, null semantics, sizing policy, and saturation behavior need an explicit compatibility contract. This spike supports `i64` equality and byte-oriented UTF-8 trigrams only.
 - Bloom stats for all zones are regular child-array data. Their layout and caching should be profiled for many indexed columns and remote reads.
 
-Recommendation: pursue the bundle interface and an explicit per-column writer declaration, while retaining the three lower-level registries. The selective equality benchmark is large enough to justify a production-quality experiment, but index selection must remain workload-aware and opt-in. The SQL run must show that real substring selectivity survives filter saturation and pays back the added file bytes before the trigram prototype is considered a win.
+Recommendation: pursue the bundle interface and an explicit per-column writer declaration while
+retaining the three lower-level registries. A production-quality equality Bloom experiment is
+justified for opt-in, high-cardinality point-lookups: it is correct, prunes as expected, and speeds
+up ClickBench q19 after a same-run control. Do not pursue this generic fixed-size trigram Bloom as
+the production design. First fix rewrite coverage for the actual ClickBench expression shape, then
+prototype adaptive sizing/saturation cutoffs and a rarer-token or sequence-aware representation
+that can reject zones when common individual trigrams cannot. Any successor should have to beat the
+current negative FineWeb results, including index bytes and probe cost, before being enabled.
