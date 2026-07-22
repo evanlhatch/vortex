@@ -82,7 +82,7 @@ mod tests {
     use vortex_error::VortexResult;
     use vortex_session::VortexSession;
 
-    use crate::compress::DEFAULT_DICT12_CONFIG;
+    use crate::DEFAULT_CONFIG;
     use crate::compress::onpair_compress;
 
     static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
@@ -107,7 +107,7 @@ mod tests {
     fn test_cast_onpair_conformance(#[case] array: VarBinArray) -> VortexResult<()> {
         let array = array.into_array();
         let mut ctx = SESSION.create_execution_ctx();
-        let onpair = onpair_compress(&array, DEFAULT_DICT12_CONFIG, &mut ctx)?;
+        let onpair = onpair_compress(&array, DEFAULT_CONFIG, &mut ctx)?;
         test_cast_conformance(&onpair.into_array(), &mut ctx);
         Ok(())
     }

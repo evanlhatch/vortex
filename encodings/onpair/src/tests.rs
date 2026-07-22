@@ -27,11 +27,11 @@ use vortex_array::validity::Validity;
 use vortex_buffer::BufferMut;
 use vortex_session::VortexSession;
 
+use crate::DEFAULT_CONFIG;
 use crate::OnPair;
 use crate::OnPairArrayExt;
 use crate::OnPairArraySlotsExt;
 use crate::OnPairMetadata;
-use crate::compress::DEFAULT_DICT12_CONFIG;
 use crate::compress::onpair_compress;
 
 static SESSION: LazyLock<VortexSession> = LazyLock::new(vortex_array::array_session);
@@ -40,7 +40,7 @@ fn compress_onpair(
     array: &vortex_array::ArrayRef,
     ctx: &mut vortex_array::ExecutionCtx,
 ) -> vortex_error::VortexResult<crate::OnPairArray> {
-    onpair_compress(array, DEFAULT_DICT12_CONFIG, ctx)?
+    onpair_compress(array, DEFAULT_CONFIG, ctx)?
         .try_downcast::<OnPair>()
         .map_err(|array| {
             vortex_error::vortex_err!("expected OnPair array, got {}", array.encoding_id())
@@ -145,7 +145,7 @@ fn test_onpair_roundtrip() -> vortex_error::VortexResult<()> {
     let input = sample_input();
 
     let mut ctx = SESSION.create_execution_ctx();
-    let compressed = onpair_compress(&input.into_array(), DEFAULT_DICT12_CONFIG, &mut ctx)?;
+    let compressed = onpair_compress(&input.into_array(), DEFAULT_CONFIG, &mut ctx)?;
     assert!(compressed.clone().into_array().is::<OnPair>());
 
     let decoded = compressed
@@ -233,7 +233,7 @@ fn test_onpair_nullable_canonicalize() -> vortex_error::VortexResult<()> {
         DType::Utf8(Nullability::Nullable),
     );
     let mut ctx = SESSION.create_execution_ctx();
-    let arr = onpair_compress(&input.into_array(), DEFAULT_DICT12_CONFIG, &mut ctx)?;
+    let arr = onpair_compress(&input.into_array(), DEFAULT_CONFIG, &mut ctx)?;
     let canonical = arr.into_array().execute::<VarBinViewArray>(&mut ctx)?;
     let mask = canonical
         .validity()?
@@ -252,7 +252,7 @@ fn test_onpair_nullable_canonicalize() -> vortex_error::VortexResult<()> {
 fn test_onpair_scalar_at() -> vortex_error::VortexResult<()> {
     let input = sample_input();
     let mut ctx = SESSION.create_execution_ctx();
-    let arr = onpair_compress(&input.into_array(), DEFAULT_DICT12_CONFIG, &mut ctx)?;
+    let arr = onpair_compress(&input.into_array(), DEFAULT_CONFIG, &mut ctx)?;
     let s = arr.into_array().execute_scalar(2, &mut ctx)?;
     let v = s.as_utf8().value().unwrap();
     assert_eq!(v.as_bytes(), b"https://www.test.org/page");
@@ -277,7 +277,7 @@ fn test_onpair_scalar_at_window() -> vortex_error::VortexResult<()> {
         DType::Utf8(Nullability::NonNullable),
     );
     let mut ctx = SESSION.create_execution_ctx();
-    let arr = onpair_compress(&varbin.into_array(), DEFAULT_DICT12_CONFIG, &mut ctx)?.into_array();
+    let arr = onpair_compress(&varbin.into_array(), DEFAULT_CONFIG, &mut ctx)?.into_array();
 
     for &i in &[0usize, 1, 999, 1000, n - 1] {
         let got = arr.execute_scalar(i, &mut ctx)?;
@@ -326,7 +326,7 @@ fn test_onpair_unroll_tail_boundaries(#[case] n: usize) -> vortex_error::VortexR
         DType::Utf8(Nullability::NonNullable),
     );
     let mut ctx = SESSION.create_execution_ctx();
-    let arr = onpair_compress(&input.into_array(), DEFAULT_DICT12_CONFIG, &mut ctx)?;
+    let arr = onpair_compress(&input.into_array(), DEFAULT_CONFIG, &mut ctx)?;
     let canonical = arr.into_array().execute::<VarBinViewArray>(&mut ctx)?;
     let mask = canonical
         .validity()?
@@ -350,7 +350,7 @@ fn test_onpair_empty() -> vortex_error::VortexResult<()> {
         DType::Utf8(Nullability::NonNullable),
     );
     let mut ctx = SESSION.create_execution_ctx();
-    let arr = onpair_compress(&input.into_array(), DEFAULT_DICT12_CONFIG, &mut ctx)?;
+    let arr = onpair_compress(&input.into_array(), DEFAULT_CONFIG, &mut ctx)?;
     assert_eq!(arr.len(), 0);
     let canonical = arr.into_array().execute::<VarBinViewArray>(&mut ctx)?;
     assert_eq!(canonical.len(), 0);
@@ -367,7 +367,7 @@ fn test_onpair_all_null() -> vortex_error::VortexResult<()> {
     )
     .into_array();
     let mut ctx = SESSION.create_execution_ctx();
-    let arr = onpair_compress(&input, DEFAULT_DICT12_CONFIG, &mut ctx)?;
+    let arr = onpair_compress(&input, DEFAULT_CONFIG, &mut ctx)?;
 
     assert!(arr.is::<Constant>());
     assert_arrays_eq!(arr, input, &mut ctx);
@@ -581,7 +581,7 @@ fn test_onpair_slice_canonicalize() -> vortex_error::VortexResult<()> {
         DType::Utf8(Nullability::NonNullable),
     );
     let mut ctx = SESSION.create_execution_ctx();
-    let arr = onpair_compress(&varbin.into_array(), DEFAULT_DICT12_CONFIG, &mut ctx)?.into_array();
+    let arr = onpair_compress(&varbin.into_array(), DEFAULT_CONFIG, &mut ctx)?.into_array();
 
     // interior (start>0, end<n), LIMIT-like (start=0, end<n), tail (start>0,
     // end=n), and a near-full window.

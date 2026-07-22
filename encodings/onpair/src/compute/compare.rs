@@ -109,8 +109,8 @@ mod tests {
     use vortex_error::vortex_err;
     use vortex_session::VortexSession;
 
+    use crate::DEFAULT_CONFIG;
     use crate::OnPair;
-    use crate::compress::DEFAULT_DICT12_CONFIG;
     use crate::compress::onpair_compress;
 
     static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
@@ -133,7 +133,7 @@ mod tests {
             DType::Utf8(Nullability::NonNullable),
         );
         let mut ctx = SESSION.create_execution_ctx();
-        let arr = onpair_compress(input.as_array(), DEFAULT_DICT12_CONFIG, &mut ctx)?.into_array();
+        let arr = onpair_compress(input.as_array(), DEFAULT_CONFIG, &mut ctx)?.into_array();
 
         let result = arr
             .binary(ConstantArray::new("", input.len()).into_array(), op)?
@@ -150,7 +150,7 @@ mod tests {
             DType::Utf8(Nullability::Nullable),
         );
         let mut ctx = SESSION.create_execution_ctx();
-        let arr = onpair_compress(input.as_array(), DEFAULT_DICT12_CONFIG, &mut ctx)?.into_array();
+        let arr = onpair_compress(input.as_array(), DEFAULT_CONFIG, &mut ctx)?.into_array();
 
         let eq_empty = arr
             .clone()
@@ -183,7 +183,7 @@ mod tests {
             DType::Utf8(Nullability::Nullable),
         );
         let mut ctx = SESSION.create_execution_ctx();
-        let arr = onpair_compress(input.as_array(), DEFAULT_DICT12_CONFIG, &mut ctx)?.into_array();
+        let arr = onpair_compress(input.as_array(), DEFAULT_CONFIG, &mut ctx)?.into_array();
         let rhs = ConstantArray::new("hello", arr.len()).into_array();
 
         let eq = arr
@@ -218,7 +218,7 @@ mod tests {
             DType::Utf8(Nullability::NonNullable),
         );
         let mut ctx = SESSION.create_execution_ctx();
-        let arr = onpair_compress(input.as_array(), DEFAULT_DICT12_CONFIG, &mut ctx)?
+        let arr = onpair_compress(input.as_array(), DEFAULT_CONFIG, &mut ctx)?
             .try_downcast::<OnPair>()
             .map_err(|array| vortex_err!("expected OnPair array, got {}", array.encoding_id()))?;
         let rhs = ConstantArray::new("hello", arr.len()).into_array();
@@ -258,7 +258,7 @@ mod tests {
             DType::Utf8(Nullability::NonNullable),
         );
         let mut ctx = SESSION.create_execution_ctx();
-        let arr = onpair_compress(input.as_array(), DEFAULT_DICT12_CONFIG, &mut ctx)?.into_array();
+        let arr = onpair_compress(input.as_array(), DEFAULT_CONFIG, &mut ctx)?.into_array();
         let sliced = arr.slice(1..4)?;
         assert!(sliced.is::<OnPair>(), "slice dropped OnPair encoding");
         let sliced = sliced

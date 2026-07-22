@@ -25,7 +25,7 @@ use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::Nullability;
 use vortex_array::scalar_fn::fns::operators::Operator;
-use vortex_onpair::DEFAULT_DICT12_CONFIG;
+use vortex_onpair::DEFAULT_CONFIG;
 use vortex_onpair::onpair_compress;
 use vortex_session::VortexSession;
 
@@ -74,7 +74,7 @@ fn smoke_100k_rows() -> vortex_error::VortexResult<()> {
 
     let mut ctx = SESSION.create_execution_ctx();
     let t0 = Instant::now();
-    let arr = onpair_compress(&varbin.into_array(), DEFAULT_DICT12_CONFIG, &mut ctx)?;
+    let arr = onpair_compress(&varbin.into_array(), DEFAULT_CONFIG, &mut ctx)?;
     let compress_elapsed = t0.elapsed();
     eprintln!(
         "compressed {} rows ({} raw bytes) in {:?}",

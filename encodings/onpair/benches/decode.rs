@@ -45,7 +45,7 @@ use vortex_array::dtype::NativePType;
 use vortex_array::dtype::Nullability;
 use vortex_buffer::Buffer;
 use vortex_mask::Mask;
-use vortex_onpair::DEFAULT_DICT12_CONFIG;
+use vortex_onpair::DEFAULT_CONFIG;
 use vortex_onpair::OnPair;
 use vortex_onpair::OnPairArray;
 use vortex_onpair::OnPairArraySlotsExt;
@@ -162,7 +162,7 @@ fn compress(n: usize, shape: Shape, ctx: &mut ExecutionCtx) -> OnPairArray {
         strings.iter().map(|s| Some(s.as_bytes())),
         DType::Utf8(Nullability::NonNullable),
     );
-    onpair_compress(varbin.as_array(), DEFAULT_DICT12_CONFIG, ctx)
+    onpair_compress(varbin.as_array(), DEFAULT_CONFIG, ctx)
         .unwrap_or_else(|e| panic!("onpair_compress failed: {e}"))
         .try_downcast::<OnPair>()
         .unwrap_or_else(|array| panic!("expected OnPair array, got {}", array.encoding_id()))
@@ -181,8 +181,11 @@ fn materialise(arr: &OnPairArray, ctx: &mut ExecutionCtx) -> (DecodeInputs, usiz
     let view = arr.as_view();
     let dict_offsets = widen::<u32>(view.dict_offsets(), ctx);
     let dict_bytes = view.dict_bytes_handle().clone();
-    CompactDictionaryView::validate_safety(dict_bytes.as_host().as_slice(), dict_offsets.as_slice())
-        .expect("valid OnPair dictionary");
+    CompactDictionaryView::validate_safety(
+        dict_bytes.as_host().as_slice(),
+        dict_offsets.as_slice(),
+    )
+    .expect("valid OnPair dictionary");
     let inputs = DecodeInputs {
         dict_bytes,
         dict_offsets,

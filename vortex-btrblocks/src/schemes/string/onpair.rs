@@ -13,7 +13,7 @@ use vortex_compressor::scheme::CompressionEstimate;
 use vortex_compressor::scheme::DeferredEstimate;
 use vortex_compressor::scheme::SchemeId;
 use vortex_error::VortexResult;
-use vortex_onpair::DEFAULT_DICT12_CONFIG;
+use vortex_onpair::DEFAULT_CONFIG;
 use vortex_onpair::OnPair;
 use vortex_onpair::OnPairArrayExt;
 use vortex_onpair::OnPairArraySlotsExt;
@@ -73,7 +73,7 @@ impl Scheme for OnPairScheme {
         exec_ctx: &mut ExecutionCtx,
     ) -> VortexResult<ArrayRef> {
         let utf8 = data.array_as_varbinview().into_owned();
-        let encoded = onpair_compress(utf8.as_array(), DEFAULT_DICT12_CONFIG, exec_ctx)?;
+        let encoded = onpair_compress(utf8.as_array(), DEFAULT_CONFIG, exec_ctx)?;
         let Some(onpair_array) = encoded.as_opt::<OnPair>() else {
             return Ok(encoded);
         };

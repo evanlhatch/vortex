@@ -24,12 +24,6 @@ use vortex_mask::AllOr;
 
 use crate::OnPair;
 
-/// Default OnPair training configuration: 12-bit codes ("dict-12").
-pub const DEFAULT_DICT12_CONFIG: Config = Config {
-    seed: Some(42),
-    ..onpair::DEFAULT_CONFIG
-};
-
 /// Compress any [`ArrayRef`] whose canonical form is a string array.
 ///
 /// All-null inputs are returned as a [`ConstantArray`].
