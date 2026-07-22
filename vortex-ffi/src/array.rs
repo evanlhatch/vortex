@@ -268,13 +268,15 @@ pub unsafe extern "C-unwind" fn vx_array_slice(
 #[unsafe(no_mangle)]
 #[allow(clippy::disallowed_methods)]
 pub unsafe extern "C-unwind" fn vx_array_element_is_invalid(
+    session: *const vx_session,
     array: *const vx_array,
     index: usize,
     error: *mut *mut vx_error,
 ) -> bool {
     try_or_default(error, || {
         vortex_ensure!(!array.is_null());
-        vx_array::as_ref(array).is_invalid(index, &mut legacy_session().create_execution_ctx())
+        let session = unsafe { vx_session_ref(session) }?;
+        vx_array::as_ref(array).is_invalid(index, &mut session.create_execution_ctx())
     })
 }
 
@@ -423,33 +425,41 @@ macro_rules! ffiarray_get_ptype {
     ($ptype:ident) => {
         paste! {
             #[unsafe(no_mangle)]
-            pub unsafe extern "C-unwind" fn [<vx_array_get_ $ptype>](array: *const vx_array, index: usize) -> $ptype {
-                let array = vx_array::as_ref(array);
-                // TODO(joe): propagate this error up instead of expecting
-                #[allow(clippy::disallowed_methods)]
-                let value = array
-                    .execute_scalar(index, &mut legacy_session().create_execution_ctx())
-                    .vortex_expect("scalar_at failed");
-                // TODO(joe): propagate this error up instead of expecting
-                value.as_primitive()
-                    .as_::<$ptype>()
-                    .vortex_expect("null value")
+            #[allow(clippy::disallowed_methods)]
+            pub unsafe extern "C-unwind" fn [<vx_array_get_ $ptype>](
+                session: *const vx_session,
+                array: *const vx_array,
+                index: usize,
+                error_out: *mut *mut vx_error,
+            ) -> $ptype {
+                try_or_default(error_out, || {
+                    let session = unsafe { vx_session_ref(session) }?;
+                    let array = vx_array::as_ref(array);
+                    let value = array.execute_scalar(index, &mut session.create_execution_ctx())?;
+                    value.as_primitive()
+                        .as_::<$ptype>()
+                        .ok_or_else(|| vortex_err!("null value"))
+                })
             }
 
             #[unsafe(no_mangle)]
-            pub unsafe extern "C-unwind" fn [<vx_array_get_storage_ $ptype>](array: *const vx_array, index: usize) -> $ptype {
-                let array = vx_array::as_ref(array);
-                // TODO(joe): propagate this error up instead of expecting
-                #[allow(clippy::disallowed_methods)]
-                let value = array
-                    .execute_scalar(index, &mut legacy_session().create_execution_ctx())
-                    .vortex_expect("scalar_at failed");
-                // TODO(joe): propagate this error up instead of expecting
-                value.as_extension()
-                    .to_storage_scalar()
-                    .as_primitive()
-                    .as_::<$ptype>()
-                    .vortex_expect("null value")
+            #[allow(clippy::disallowed_methods)]
+            pub unsafe extern "C-unwind" fn [<vx_array_get_storage_ $ptype>](
+                session: *const vx_session,
+                array: *const vx_array,
+                index: usize,
+                error_out: *mut *mut vx_error,
+            ) -> $ptype {
+                try_or_default(error_out, || {
+                    let session = unsafe { vx_session_ref(session) }?;
+                    let array = vx_array::as_ref(array);
+                    let value = array.execute_scalar(index, &mut session.create_execution_ctx())?;
+                    value.as_extension()
+                        .to_storage_scalar()
+                        .as_primitive()
+                        .as_::<$ptype>()
+                        .ok_or_else(|| vortex_err!("null value"))
+                })
             }
         }
     };
@@ -674,6 +684,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn test_simple() {
         unsafe {
+            let session = vx_session_new();
             let primitive = PrimitiveArray::new(buffer![1i32, 2i32, 3i32], Validity::NonNullable);
             let ffi_array = vx_array::new(Arc::new(primitive.into_array()));
 
@@ -685,12 +696,17 @@ mod tests {
                 vx_dtype_variant::DTYPE_PRIMITIVE
             );
 
-            assert_eq!(vx_array_get_i32(ffi_array, 0), 1);
-            assert_eq!(vx_array_get_i32(ffi_array, 1), 2);
-            assert_eq!(vx_array_get_i32(ffi_array, 2), 3);
+            let mut error = ptr::null_mut();
+            assert_eq!(vx_array_get_i32(session, ffi_array, 0, &raw mut error), 1);
+            assert_no_error(error);
+            assert_eq!(vx_array_get_i32(session, ffi_array, 1, &raw mut error), 2);
+            assert_no_error(error);
+            assert_eq!(vx_array_get_i32(session, ffi_array, 2, &raw mut error), 3);
+            assert_no_error(error);
 
             vx_dtype_free(array_dtype);
             vx_array_free(ffi_array);
+            vx_session_free(session);
         }
     }
 
@@ -712,6 +728,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn test_slice() {
         unsafe {
+            let session = vx_session_new();
             let primitive =
                 PrimitiveArray::new(buffer![1i32, 2i32, 3i32, 4i32, 5i32], Validity::NonNullable);
             let ffi_array = vx_array::new(Arc::new(primitive.into_array()));
@@ -720,12 +737,16 @@ mod tests {
             let sliced = vx_array_slice(ffi_array, 1, 4, &raw mut error);
             assert_no_error(error);
             assert_eq!(vx_array_len(sliced), 3);
-            assert_eq!(vx_array_get_i32(sliced, 0), 2);
-            assert_eq!(vx_array_get_i32(sliced, 1), 3);
-            assert_eq!(vx_array_get_i32(sliced, 2), 4);
+            assert_eq!(vx_array_get_i32(session, sliced, 0, &raw mut error), 2);
+            assert_no_error(error);
+            assert_eq!(vx_array_get_i32(session, sliced, 1, &raw mut error), 3);
+            assert_no_error(error);
+            assert_eq!(vx_array_get_i32(session, sliced, 2, &raw mut error), 4);
+            assert_no_error(error);
 
             vx_array_free(sliced);
             vx_array_free(ffi_array);
+            vx_session_free(session);
         }
     }
 
@@ -734,6 +755,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn test_null_operations() {
         unsafe {
+            let session = vx_session_new();
             let primitive = PrimitiveArray::new(
                 buffer![1i32, 2i32, 3i32],
                 Validity::from_iter([true, false, true]),
@@ -741,11 +763,26 @@ mod tests {
             let ffi_array = vx_array::new(Arc::new(primitive.into_array()));
 
             let mut error = ptr::null_mut();
-            assert!(!vx_array_element_is_invalid(ffi_array, 0, &raw mut error));
+            assert!(!vx_array_element_is_invalid(
+                session,
+                ffi_array,
+                0,
+                &raw mut error
+            ));
             assert_no_error(error);
-            assert!(vx_array_element_is_invalid(ffi_array, 1, &raw mut error));
+            assert!(vx_array_element_is_invalid(
+                session,
+                ffi_array,
+                1,
+                &raw mut error
+            ));
             assert_no_error(error);
-            assert!(!vx_array_element_is_invalid(ffi_array, 2, &raw mut error));
+            assert!(!vx_array_element_is_invalid(
+                session,
+                ffi_array,
+                2,
+                &raw mut error
+            ));
             assert_no_error(error);
 
             let null_count = vx_array_invalid_count(ffi_array, &raw mut error);
@@ -753,6 +790,7 @@ mod tests {
             assert_eq!(null_count, 1);
 
             vx_array_free(ffi_array);
+            vx_session_free(session);
         }
     }
 
@@ -761,6 +799,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn test_get_field() {
         unsafe {
+            let session = vx_session_new();
             let names = VarBinViewArray::from_iter_str(["Alice", "Bob", "Charlie"]);
             let ages = PrimitiveArray::new(buffer![30u8, 25u8, 35u8], Validity::NonNullable);
             let struct_array = StructArray::try_new(
@@ -780,9 +819,12 @@ mod tests {
             let field1 = vx_array_get_field(ffi_array, 1, &raw mut error);
             assert_no_error(error);
             assert_eq!(vx_array_len(field1), 3);
-            assert_eq!(vx_array_get_u8(field1, 0), 30);
-            assert_eq!(vx_array_get_u8(field1, 1), 25);
-            assert_eq!(vx_array_get_u8(field1, 2), 35);
+            assert_eq!(vx_array_get_u8(session, field1, 0, &raw mut error), 30);
+            assert_no_error(error);
+            assert_eq!(vx_array_get_u8(session, field1, 1, &raw mut error), 25);
+            assert_no_error(error);
+            assert_eq!(vx_array_get_u8(session, field1, 2, &raw mut error), 35);
+            assert_no_error(error);
 
             // Test out of bounds
             let field_oob = vx_array_get_field(ffi_array, 2, &raw mut error);
@@ -793,6 +835,7 @@ mod tests {
             vx_array_free(field0);
             vx_array_free(field1);
             vx_array_free(ffi_array);
+            vx_session_free(session);
         }
     }
 
@@ -803,6 +846,8 @@ mod tests {
         unsafe {
             // Test a representative sample of primitive types
             // The macro generates identical code for all types, so exhaustive testing is redundant
+
+            let session = vx_session_new();
 
             // Test signed integer with edge cases
             let mut error = ptr::null_mut();
@@ -823,9 +868,18 @@ mod tests {
             assert!(!ffi_i32.is_null());
 
             assert!(vx_array_is_primitive(ffi_i32, vx_ptype::PTYPE_I32));
-            assert_eq!(vx_array_get_i32(ffi_i32, 0), i32::MAX);
-            assert_eq!(vx_array_get_i32(ffi_i32, 1), i32::MIN);
-            assert_eq!(vx_array_get_i32(ffi_i32, 2), 0);
+            assert_eq!(
+                vx_array_get_i32(session, ffi_i32, 0, &raw mut error),
+                i32::MAX
+            );
+            assert_no_error(error);
+            assert_eq!(
+                vx_array_get_i32(session, ffi_i32, 1, &raw mut error),
+                i32::MIN
+            );
+            assert_no_error(error);
+            assert_eq!(vx_array_get_i32(session, ffi_i32, 2, &raw mut error), 0);
+            assert_no_error(error);
             vx_array_free(ffi_i32);
 
             // Test unsigned integer
@@ -840,9 +894,15 @@ mod tests {
             assert_no_error(error);
             assert!(!ffi_u64.is_null());
             assert!(vx_array_is_primitive(ffi_u64, vx_ptype::PTYPE_U64));
-            assert_eq!(vx_array_get_u64(ffi_u64, 0), u64::MAX);
-            assert_eq!(vx_array_get_u64(ffi_u64, 1), 0);
-            assert_eq!(vx_array_get_u64(ffi_u64, 2), 42);
+            assert_eq!(
+                vx_array_get_u64(session, ffi_u64, 0, &raw mut error),
+                u64::MAX
+            );
+            assert_no_error(error);
+            assert_eq!(vx_array_get_u64(session, ffi_u64, 1, &raw mut error), 0);
+            assert_no_error(error);
+            assert_eq!(vx_array_get_u64(session, ffi_u64, 2, &raw mut error), 42);
+            assert_no_error(error);
             vx_array_free(ffi_u64);
 
             // Test floating point including special values
@@ -857,9 +917,15 @@ mod tests {
             assert_no_error(error);
             assert!(!ffi_f64.is_null());
             assert!(vx_array_is_primitive(ffi_f64, vx_ptype::PTYPE_F64));
-            assert_eq!(vx_array_get_f64(ffi_f64, 0), f64::NEG_INFINITY);
-            assert_eq!(vx_array_get_f64(ffi_f64, 1), 0.0);
-            assert!(vx_array_get_f64(ffi_f64, 2).is_nan());
+            assert_eq!(
+                vx_array_get_f64(session, ffi_f64, 0, &raw mut error),
+                f64::NEG_INFINITY
+            );
+            assert_no_error(error);
+            assert_eq!(vx_array_get_f64(session, ffi_f64, 1, &raw mut error), 0.0);
+            assert_no_error(error);
+            assert!(vx_array_get_f64(session, ffi_f64, 2, &raw mut error).is_nan());
+            assert_no_error(error);
             vx_array_free(ffi_f64);
 
             // Test f16 (special half-precision type) - skip in Miri due to inline assembly
@@ -875,10 +941,20 @@ mod tests {
                 );
                 assert_no_error(error);
                 assert!(!ffi_f16.is_null());
-                assert_eq!(vx_array_get_f16(ffi_f16, 0), f16::from_f32(1.0));
-                assert_eq!(vx_array_get_f16(ffi_f16, 1), f16::from_f32(-0.5));
+                assert_eq!(
+                    vx_array_get_f16(session, ffi_f16, 0, &raw mut error),
+                    f16::from_f32(1.0)
+                );
+                assert_no_error(error);
+                assert_eq!(
+                    vx_array_get_f16(session, ffi_f16, 1, &raw mut error),
+                    f16::from_f32(-0.5)
+                );
+                assert_no_error(error);
                 vx_array_free(ffi_f16);
             }
+
+            vx_session_free(session);
         }
     }
 
@@ -1046,6 +1122,8 @@ mod tests {
         assert!(!vx.is_null());
 
         unsafe {
+            let session = vx_session_new();
+
             assert!(vx_array_has_dtype(vx, vx_dtype_variant::DTYPE_STRUCT));
             assert_eq!(vx_array_len(vx), 3);
             assert!(!vx_array_is_nullable(vx));
@@ -1053,18 +1131,21 @@ mod tests {
             let a = vx_array_get_field(vx, 0, &raw mut error);
             assert_no_error(error);
             assert!(vx_array_is_primitive(a, vx_ptype::PTYPE_I32));
-            assert_eq!(vx_array_get_i32(a, 0), 1);
-            assert_eq!(vx_array_get_i32(a, 2), 3);
+            assert_eq!(vx_array_get_i32(session, a, 0, &raw mut error), 1);
+            assert_no_error(error);
+            assert_eq!(vx_array_get_i32(session, a, 2, &raw mut error), 3);
+            assert_no_error(error);
             vx_array_free(a);
 
             let b = vx_array_get_field(vx, 1, &raw mut error);
             assert_no_error(error);
             assert!(vx_array_has_dtype(b, vx_dtype_variant::DTYPE_UTF8));
-            assert!(vx_array_element_is_invalid(b, 1, &raw mut error));
+            assert!(vx_array_element_is_invalid(session, b, 1, &raw mut error));
             assert_no_error(error);
             vx_array_free(b);
 
             vx_array_free(vx);
+            vx_session_free(session);
         }
     }
 

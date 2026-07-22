@@ -742,7 +742,10 @@ const vx_array *vx_array_slice(const vx_array *array, size_t start, size_t stop,
  * validity array. Sets error if index is out of bounds or underlying validity
  * array is corrupted.
  */
-bool vx_array_element_is_invalid(const vx_array *array, size_t index, vx_error **error);
+bool vx_array_element_is_invalid(const vx_session *session,
+                                 const vx_array *array,
+                                 size_t index,
+                                 vx_error **error);
 
 /**
  * Check how many items in the array are invalid (null).
@@ -800,49 +803,85 @@ const vx_array *vx_array_new_primitive(vx_ptype ptype,
 const vx_array *
 vx_array_from_arrow(FFI_ArrowArray *array, FFI_ArrowSchema *schema, bool nullable, vx_error **error_out);
 
-uint8_t vx_array_get_u8(const vx_array *array, size_t index);
+uint8_t vx_array_get_u8(const vx_session *session, const vx_array *array, size_t index, vx_error **error_out);
 
-uint8_t vx_array_get_storage_u8(const vx_array *array, size_t index);
+uint8_t
+vx_array_get_storage_u8(const vx_session *session, const vx_array *array, size_t index, vx_error **error_out);
 
-uint16_t vx_array_get_u16(const vx_array *array, size_t index);
+uint16_t
+vx_array_get_u16(const vx_session *session, const vx_array *array, size_t index, vx_error **error_out);
 
-uint16_t vx_array_get_storage_u16(const vx_array *array, size_t index);
+uint16_t vx_array_get_storage_u16(const vx_session *session,
+                                  const vx_array *array,
+                                  size_t index,
+                                  vx_error **error_out);
 
-uint32_t vx_array_get_u32(const vx_array *array, size_t index);
+uint32_t
+vx_array_get_u32(const vx_session *session, const vx_array *array, size_t index, vx_error **error_out);
 
-uint32_t vx_array_get_storage_u32(const vx_array *array, size_t index);
+uint32_t vx_array_get_storage_u32(const vx_session *session,
+                                  const vx_array *array,
+                                  size_t index,
+                                  vx_error **error_out);
 
-uint64_t vx_array_get_u64(const vx_array *array, size_t index);
+uint64_t
+vx_array_get_u64(const vx_session *session, const vx_array *array, size_t index, vx_error **error_out);
 
-uint64_t vx_array_get_storage_u64(const vx_array *array, size_t index);
+uint64_t vx_array_get_storage_u64(const vx_session *session,
+                                  const vx_array *array,
+                                  size_t index,
+                                  vx_error **error_out);
 
-int8_t vx_array_get_i8(const vx_array *array, size_t index);
+int8_t vx_array_get_i8(const vx_session *session, const vx_array *array, size_t index, vx_error **error_out);
 
-int8_t vx_array_get_storage_i8(const vx_array *array, size_t index);
+int8_t
+vx_array_get_storage_i8(const vx_session *session, const vx_array *array, size_t index, vx_error **error_out);
 
-int16_t vx_array_get_i16(const vx_array *array, size_t index);
+int16_t
+vx_array_get_i16(const vx_session *session, const vx_array *array, size_t index, vx_error **error_out);
 
-int16_t vx_array_get_storage_i16(const vx_array *array, size_t index);
+int16_t vx_array_get_storage_i16(const vx_session *session,
+                                 const vx_array *array,
+                                 size_t index,
+                                 vx_error **error_out);
 
-int32_t vx_array_get_i32(const vx_array *array, size_t index);
+int32_t
+vx_array_get_i32(const vx_session *session, const vx_array *array, size_t index, vx_error **error_out);
 
-int32_t vx_array_get_storage_i32(const vx_array *array, size_t index);
+int32_t vx_array_get_storage_i32(const vx_session *session,
+                                 const vx_array *array,
+                                 size_t index,
+                                 vx_error **error_out);
 
-int64_t vx_array_get_i64(const vx_array *array, size_t index);
+int64_t
+vx_array_get_i64(const vx_session *session, const vx_array *array, size_t index, vx_error **error_out);
 
-int64_t vx_array_get_storage_i64(const vx_array *array, size_t index);
+int64_t vx_array_get_storage_i64(const vx_session *session,
+                                 const vx_array *array,
+                                 size_t index,
+                                 vx_error **error_out);
 
-uint16_t vx_array_get_f16(const vx_array *array, size_t index);
+uint16_t
+vx_array_get_f16(const vx_session *session, const vx_array *array, size_t index, vx_error **error_out);
 
-uint16_t vx_array_get_storage_f16(const vx_array *array, size_t index);
+uint16_t vx_array_get_storage_f16(const vx_session *session,
+                                  const vx_array *array,
+                                  size_t index,
+                                  vx_error **error_out);
 
-float vx_array_get_f32(const vx_array *array, size_t index);
+float vx_array_get_f32(const vx_session *session, const vx_array *array, size_t index, vx_error **error_out);
 
-float vx_array_get_storage_f32(const vx_array *array, size_t index);
+float vx_array_get_storage_f32(const vx_session *session,
+                               const vx_array *array,
+                               size_t index,
+                               vx_error **error_out);
 
-double vx_array_get_f64(const vx_array *array, size_t index);
+double vx_array_get_f64(const vx_session *session, const vx_array *array, size_t index, vx_error **error_out);
 
-double vx_array_get_storage_f64(const vx_array *array, size_t index);
+double vx_array_get_storage_f64(const vx_session *session,
+                                const vx_array *array,
+                                size_t index,
+                                vx_error **error_out);
 
 /**
  * Return UTF-8 string at "index" in a canonical Utf8 array.
