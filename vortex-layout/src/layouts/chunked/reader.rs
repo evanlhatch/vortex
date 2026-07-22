@@ -53,7 +53,7 @@ impl ChunkedReader {
         ctx: LayoutReaderContext,
     ) -> Self {
         let nchildren = layout.nchildren();
-        let dtypes = vec![layout.dtype.clone(); nchildren];
+        let dtypes = vec![layout.dtype().clone(); nchildren];
 
         // format!() has non-marginal overhead for short queries like random
         // access benchmarks
@@ -66,7 +66,7 @@ impl ChunkedReader {
         };
 
         let lazy_children = LazyReaderChildren::new(
-            Arc::clone(&layout.children),
+            Arc::clone(layout.children()),
             dtypes,
             names,
             segment_source,
@@ -365,7 +365,6 @@ mod test {
     use vortex_io::session::RuntimeSessionExt;
     use vortex_session::registry::ReadContext;
 
-    use crate::IntoLayout;
     use crate::LayoutRef;
     use crate::LayoutStrategy;
     use crate::OwnedLayoutChildren;

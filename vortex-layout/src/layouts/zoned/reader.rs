@@ -45,12 +45,12 @@ impl ZonedReader {
     ) -> VortexResult<Self> {
         let aggregate_fns = layout.aggregate_fns(&session)?;
         let dtypes = vec![
-            layout.dtype.clone(),
+            layout.dtype().clone(),
             layout.stats_table_dtype_for(&aggregate_fns),
         ];
         let names = vec![Arc::clone(&name), format!("{}.zones", name).into()];
         let lazy_children = Arc::new(LazyReaderChildren::new(
-            Arc::clone(&layout.children),
+            Arc::clone(layout.children()),
             dtypes,
             names,
             Arc::clone(&segment_source),
@@ -248,7 +248,6 @@ mod test {
     use vortex_session::VortexSession;
     use vortex_session::registry::ReadContext;
 
-    use crate::IntoLayout;
     use crate::LayoutBuildContext;
     use crate::LayoutRef;
     use crate::LayoutStrategy;

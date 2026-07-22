@@ -82,7 +82,7 @@ impl StructReader {
                 .collect()
         });
 
-        let nullable = layout.dtype.is_nullable();
+        let nullable = layout.dtype().is_nullable();
         let extra = nullable as usize;
 
         let mut dtypes: Vec<DType> = Vec::with_capacity(struct_dt.nfields() + extra);
@@ -95,7 +95,7 @@ impl StructReader {
         names.extend(struct_dt.names().iter().map(|x| Arc::clone(x.inner())));
 
         let lazy_children = LazyReaderChildren::new(
-            Arc::clone(&layout.children),
+            Arc::clone(layout.children()),
             dtypes,
             names,
             Arc::clone(&segment_source),

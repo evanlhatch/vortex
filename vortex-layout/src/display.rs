@@ -127,7 +127,7 @@ impl DisplayLayoutTree {
     fn make_tree(&self, layout: LayoutRef) -> VortexResult<Tree<String>> {
         // Build the node label with encoding, dtype, and metadata
         let mut node_parts = vec![
-            format!("{}", layout.encoding()),
+            format!("{}", layout.encoding_id()),
             format!("dtype: {}", layout.dtype()),
         ];
 
@@ -232,7 +232,6 @@ mod tests {
     use vortex_io::runtime::single::block_on;
     use vortex_io::session::RuntimeSessionExt;
 
-    use crate::IntoLayout;
     use crate::OwnedLayoutChildren;
     use crate::layouts::chunked::ChunkedLayout;
     use crate::layouts::flat::Flat;

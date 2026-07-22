@@ -107,7 +107,7 @@ impl LayoutReader for FlatReader {
         split_range: &SplitRange,
         splits: &mut RowSplits,
     ) -> VortexResult<()> {
-        split_range.check_bounds(self.layout.row_count)?;
+        split_range.check_bounds(self.layout.row_count())?;
         splits.push(split_range.root_row_range().end);
         Ok(())
     }

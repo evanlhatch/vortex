@@ -11,7 +11,7 @@ use vortex::error::vortex_bail;
 use vortex::file::VortexFile;
 use vortex::file::VortexOpenOptions;
 use vortex::io::session::RuntimeSessionExt;
-use vortex::layout::Layout;
+use vortex::layout::DynLayout;
 use vortex::layout::layouts::zoned::LegacyStats;
 use vortex::layout::layouts::zoned::Zoned;
 use vortex::layout::segments::SegmentFuture;
@@ -107,13 +107,16 @@ impl SegmentSource for RoutingSegmentSource {
     }
 }
 
-fn control_plane_segments(layout: &dyn Layout, segment_count: usize) -> VortexResult<Vec<bool>> {
+fn control_plane_segments(layout: &dyn DynLayout, segment_count: usize) -> VortexResult<Vec<bool>> {
     let mut control_segments = vec![false; segment_count];
     mark_zone_map_segments(layout, &mut control_segments)?;
     Ok(control_segments)
 }
 
-fn mark_zone_map_segments(layout: &dyn Layout, control_segments: &mut [bool]) -> VortexResult<()> {
+fn mark_zone_map_segments(
+    layout: &dyn DynLayout,
+    control_segments: &mut [bool],
+) -> VortexResult<()> {
     if layout.is::<Zoned>() || layout.is::<LegacyStats>() {
         mark_layout_segments(layout.child(1)?.as_ref(), control_segments)?;
         mark_zone_map_segments(layout.child(0)?.as_ref(), control_segments)?;
@@ -126,7 +129,7 @@ fn mark_zone_map_segments(layout: &dyn Layout, control_segments: &mut [bool]) ->
     Ok(())
 }
 
-fn mark_layout_segments(layout: &dyn Layout, control_segments: &mut [bool]) -> VortexResult<()> {
+fn mark_layout_segments(layout: &dyn DynLayout, control_segments: &mut [bool]) -> VortexResult<()> {
     for id in layout.segment_ids() {
         let idx = usize::try_from(*id)?;
         let Some(is_control) = control_segments.get_mut(idx) else {
@@ -153,7 +156,6 @@ mod tests {
     use vortex::array::dtype::PType;
     use vortex::array::dtype::StructFields;
     use vortex::buffer::ByteBuffer;
-    use vortex::layout::IntoLayout;
     use vortex::layout::layouts::flat::FlatLayout;
     use vortex::layout::layouts::zoned::ZonedLayout;
     use vortex::session::registry::ReadContext;

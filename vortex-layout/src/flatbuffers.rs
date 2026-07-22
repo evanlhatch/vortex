@@ -18,7 +18,7 @@ use vortex_flatbuffers::layout;
 use vortex_session::VortexSession;
 use vortex_session::registry::ReadContext;
 
-use crate::Layout;
+use crate::DynLayout;
 use crate::LayoutBuildContext;
 use crate::LayoutContext;
 use crate::LayoutRef;
@@ -149,7 +149,7 @@ fn foreign_layout_from_fb(
     ))
 }
 
-impl dyn Layout + '_ {
+impl dyn DynLayout + '_ {
     /// Serialize the layout into a [`FlatBufferBuilder`].
     pub fn flatbuffer_writer<'a>(
         &'a self,
@@ -161,7 +161,7 @@ impl dyn Layout + '_ {
 
 /// An adapter struct for writing a layout to a FlatBuffer.
 struct LayoutFlatBufferWriter<'a> {
-    layout: &'a dyn Layout,
+    layout: &'a dyn DynLayout,
     ctx: &'a LayoutContext,
 }
 
@@ -224,14 +224,57 @@ impl WriteFlatBuffer for LayoutFlatBufferWriter<'_> {
 #[cfg(test)]
 mod tests {
     use flatbuffers::FlatBufferBuilder;
+    use vortex_array::array_session;
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
+    use vortex_array::dtype::PType;
+    use vortex_flatbuffers::WriteFlatBufferExt;
     use vortex_flatbuffers::layout as fbl;
     use vortex_session::registry::ReadContext;
 
+    use super::layout_from_flatbuffer;
     use super::layout_from_flatbuffer_with_options;
+    use crate::LayoutContext;
     use crate::LayoutEncodingId;
+    use crate::layouts::flat::Flat;
+    use crate::layouts::flat::FlatLayout;
+    use crate::segments::SegmentId;
     use crate::session::LayoutSession;
+
+    #[test]
+    fn flat_layout_preserves_wire_fields_and_deserializes() {
+        let dtype = DType::Primitive(PType::I32, Nullability::NonNullable);
+        let array_ctx = ReadContext::new([]);
+        let layout = FlatLayout::new_with_metadata(
+            3,
+            dtype.clone(),
+            SegmentId::from(7),
+            array_ctx.clone(),
+            Some(vec![1, 2].into()),
+        );
+        let layout_ctx = LayoutContext::default();
+        let layout = layout.to_layout();
+        let buffer = layout
+            .flatbuffer_writer(&layout_ctx)
+            .write_flatbuffer_bytes()
+            .unwrap();
+
+        let wire = flatbuffers::root::<fbl::Layout>(&buffer).unwrap();
+        assert_eq!(wire.encoding(), 0);
+        assert_eq!(wire.row_count(), 3);
+        assert_eq!(wire.metadata().unwrap().bytes(), &[0x0a, 0x02, 1, 2]);
+        assert_eq!(wire.segments().unwrap().iter().collect::<Vec<_>>(), [7]);
+        assert!(wire.children().is_none());
+
+        let layout_read_ctx = ReadContext::new(layout_ctx.to_ids());
+        let session = array_session().with::<LayoutSession>();
+        let decoded =
+            layout_from_flatbuffer(buffer, &dtype, &layout_read_ctx, &array_ctx, &session).unwrap();
+        let decoded = decoded.as_::<Flat>();
+        assert_eq!(decoded.row_count(), 3);
+        assert_eq!(*decoded.segment_id(), 7);
+        assert_eq!(decoded.array_tree().unwrap().as_ref(), &[1, 2]);
+    }
 
     #[expect(clippy::disallowed_methods, reason = "test-only id")]
     #[test]
@@ -274,7 +317,7 @@ mod tests {
             LayoutEncodingId::new("vortex.test.foreign_child_layout"),
         ]);
         let array_ctx = ReadContext::new([]);
-        let session = vortex_array::array_session().with::<LayoutSession>();
+        let session = array_session().with::<LayoutSession>();
 
         let layout = layout_from_flatbuffer_with_options(
             layout_buffer,
