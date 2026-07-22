@@ -61,11 +61,7 @@ def main():
             directory_name = format_dir.name
             if directory_name not in formats_to_capture:
                 continue
-            format_name = (
-                "vortex-file-compressed"
-                if directory_name == experimental_vortex_dir
-                else directory_name
-            )
+            format_name = "vortex-file-compressed" if directory_name == experimental_vortex_dir else directory_name
 
             # Extract scale factor from path (e.g., "1.0" for tpch/1.0/vortex-file-compressed)
             # Default to "1.0" if no intermediate directory (e.g., clickbench)

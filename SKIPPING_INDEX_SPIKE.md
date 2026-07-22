@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: Copyright the Vortex contributors -->
+
 # Experimental skipping-index findings
 
 This spike answers the core questions in [#8901](https://github.com/vortex-data/vortex/issues/8901): a third-party-style aggregate can be persisted in a `ZonedLayout`, rebound on a fresh reader, and used by an equality rewrite to skip zones without changing scan planning.
