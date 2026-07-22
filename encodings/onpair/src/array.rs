@@ -163,17 +163,17 @@ pub struct OnPairData {
     /// including its trailing read padding.
     dict_bytes: BufferHandle,
     /// The storage-backed dictionary, memoized after successful initialization.
-    /// Initialization decompresses the child and validates the dictionary;
+    /// Initialization decompresses the child and safety-validates the dictionary;
     /// once cached, later operations do neither again. The dictionary owns
     /// clones of the immutable Vortex buffer handles, so this does not copy the
     /// bytes. A failed validation is not cached, and concurrent first users may
     /// duplicate initialization work before one value wins the `OnceLock`.
     ///
     /// INVARIANT: once populated, the offsets passed
-    /// [`CompactDictionary::validate_storage`] against `dict_bytes` (or came
+    /// [`CompactDictionary::validate_safety`] against `dict_bytes` (or came
     /// from the trainer via [`init_dict_offsets`](Self::init_dict_offsets)).
     /// The `Arc` cell is shared only between arrays with identical dictionary
-    /// buffers (slice / filter / cast keep both).
+    /// bytes and logically identical offsets (slice / filter / cast keep both).
     dictionary: Arc<OnceLock<CompactDictionary<OnPairDictionaryStorage>>>,
 }
 
@@ -187,31 +187,31 @@ impl OnPairData {
     }
 
     /// Seed the dictionary cell with offsets that are already known to be
-    /// conformant, so the first operation skips validation.
+    /// safe, so the first operation skips validation.
     ///
     /// This is the crate-internal trust mint (the moral equivalent of
     /// [`onpair::CompactDictionary::new_unchecked`]): compression seeds it
     /// with the trainer's offsets, which are conformant by construction.
     ///
     /// # Safety
-    /// `(self.dict_bytes, offsets)` must satisfy every [`onpair`] compact
-    /// dictionary invariant (i.e. [`CompactDictionaryView::validate`] would
-    /// succeed on them), and `offsets` must be the widened values of the
-    /// array's `dict_offsets` child. [`dict_view`] relies on this to build
-    /// unchecked dictionary views.
+    /// `(self.dict_bytes, offsets)` must satisfy the structural [`onpair`]
+    /// compact dictionary invariants (i.e.
+    /// [`CompactDictionaryView::validate_safety`] would succeed on them), and
+    /// `offsets` must be the widened values of the array's `dict_offsets` child.
+    /// [`dict_view`] relies on this to build an unchecked dictionary view.
     pub(crate) unsafe fn init_dict_offsets(&self, offsets: Buffer<u32>) {
         debug_assert!(
-            CompactDictionaryView::validate(self.dict_bytes().as_slice(), offsets.as_slice())
+            CompactDictionaryView::validate_safety(self.dict_bytes().as_slice(), offsets.as_slice())
                 .is_ok(),
-            "init_dict_offsets called with a non-conformant dictionary"
+            "init_dict_offsets called with a structurally unsafe dictionary"
         );
         let dictionary = unsafe {
-            CompactDictionary::new_unchecked_storage(OnPairDictionaryStorage {
+            CompactDictionary::new_unchecked(OnPairDictionaryStorage {
                 bytes: self.dict_bytes().clone(),
                 offsets,
             })
         };
-        // A benign race can only ever install another conformant value.
+        // A benign race can only ever install another structurally safe value.
         drop(self.dictionary.set(dictionary));
     }
 
@@ -226,13 +226,13 @@ impl OnPairData {
     }
 }
 
-/// A conformant [`CompactDictionaryView`] over `array`'s dictionary.
+/// A safety-validated [`CompactDictionaryView`] over `array`'s dictionary.
 ///
 /// The first successful initialization widens the `dict_offsets` child and
-/// validates the dictionary content; the resulting storage-backed dictionary
-/// is memoized in [`OnPairData`]. Once cached, subsequent calls — including on
-/// arrays derived by slice / filter / cast, which share the cell — pay neither
-/// cost again.
+/// safety-validates the dictionary structure; the resulting storage-backed
+/// dictionary is memoized in [`OnPairData`]. Once cached, subsequent calls —
+/// including on arrays derived by slice / filter / cast, which share the cell —
+/// pay neither cost again.
 pub(crate) fn dict_view<'a>(
     array: ArrayView<'a, OnPair>,
     ctx: &mut ExecutionCtx,
@@ -241,14 +241,12 @@ pub(crate) fn dict_view<'a>(
     let dictionary = match data.dictionary.get() {
         Some(dictionary) => dictionary,
         None => {
-            // TODO(francesco): retain a narrower offset buffer once upstream
-            // CompactDictionary supports typed dictionary offsets.
             let widened = collect_widened::<u32>(array.dict_offsets(), ctx)?;
-            let dictionary = CompactDictionary::validate_storage(OnPairDictionaryStorage {
+            let dictionary = CompactDictionary::validate_safety(OnPairDictionaryStorage {
                 bytes: data.dict_bytes().clone(),
                 offsets: widened,
             })
-            .map_err(|e| vortex_err!(InvalidArgument: "Invalid OnPair dictionary: {e}"))?;
+            .map_err(|e| vortex_err!(InvalidArgument: "Unsafe OnPair dictionary: {e}"))?;
             data.dictionary.get_or_init(|| dictionary)
         }
     };

@@ -188,7 +188,7 @@ fn empty_and_short_string_roundtrip() {
 }
 
 /// Regression for the Euro2016 compress-bench panic
-/// (`onpair::decompress`: "dictionary offsets must be nondecreasing").
+/// (`onpair::decompress`: "dictionary offsets must be strictly increasing").
 ///
 /// A large, high-cardinality corpus fills the OnPair dictionary toward its
 /// 4096-entry cap, so the cascading compressor narrows `dict_offsets` to `u16`

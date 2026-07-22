@@ -181,7 +181,7 @@ fn materialise(arr: &OnPairArray, ctx: &mut ExecutionCtx) -> (DecodeInputs, usiz
     let view = arr.as_view();
     let dict_offsets = widen::<u32>(view.dict_offsets(), ctx);
     let dict_bytes = view.dict_bytes_handle().clone();
-    CompactDictionaryView::validate(dict_bytes.as_host().as_slice(), dict_offsets.as_slice())
+    CompactDictionaryView::validate_safety(dict_bytes.as_host().as_slice(), dict_offsets.as_slice())
         .expect("valid OnPair dictionary");
     let inputs = DecodeInputs {
         dict_bytes,

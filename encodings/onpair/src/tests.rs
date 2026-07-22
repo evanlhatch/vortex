@@ -81,13 +81,13 @@ fn test_onpair_rejects_100k_token_dictionary() -> vortex_error::VortexResult<()>
     }
     dict_bytes.resize(dict_bytes.len() + onpair::MAX_TOKEN_SIZE, 0);
 
-    assert!(CompactDictionaryView::validate(&dict_bytes, &dict_offsets).is_err());
+    assert!(CompactDictionaryView::validate_safety(&dict_bytes, &dict_offsets).is_err());
     Ok(())
 }
 
-/// Dictionary content is validated lazily — construction stays lightweight,
-/// and a corrupt dictionary is rejected by the first operation that decodes
-/// or searches through it, including on derived (sliced) arrays.
+/// Dictionary safety is validated lazily — construction stays lightweight, and
+/// a structurally corrupt dictionary is rejected by the first operation that
+/// decodes or searches through it, including on derived (sliced) arrays.
 #[cfg_attr(miri, ignore)]
 #[test]
 fn test_corrupt_dictionary_rejected_on_first_use() -> vortex_error::VortexResult<()> {
