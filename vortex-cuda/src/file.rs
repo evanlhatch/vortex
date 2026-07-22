@@ -31,7 +31,10 @@ pub trait CudaOpenOptionsExt {
 
 impl CudaOpenOptionsExt for VortexOpenOptions {
     fn with_cuda(self) -> CudaOpenOptions {
-        CudaOpenOptions { inner: self }
+        CudaOpenOptions {
+            inner: self,
+            direct_io: false,
+        }
     }
 }
 
@@ -41,9 +44,19 @@ impl CudaOpenOptionsExt for VortexOpenOptions {
 /// configured before calling `with_cuda`.
 pub struct CudaOpenOptions {
     inner: VortexOpenOptions,
+    direct_io: bool,
 }
 
 impl CudaOpenOptions {
+    /// Read data-plane segments with direct I/O, bypassing the operating system page cache.
+    ///
+    /// This option is currently supported only on Linux. Footer and zone-map reads continue to
+    /// use buffered host I/O.
+    pub fn with_direct_io(mut self) -> Self {
+        self.direct_io = true;
+        self
+    }
+
     /// Open a local Vortex file for CUDA execution.
     ///
     /// The footer and zone-map segments are read through the ordinary host path. All other file
@@ -65,12 +78,12 @@ impl CudaOpenOptions {
         let pool = Arc::clone(cuda_session.pinned_buffer_pool());
         drop(cuda_session);
 
-        let reader = Arc::new(PooledFileReadAt::open(
-            &path,
-            session.handle(),
-            pool,
-            stream,
-        )?);
+        let reader = if self.direct_io {
+            PooledFileReadAt::open_direct(&path, session.handle(), pool, stream)?
+        } else {
+            PooledFileReadAt::open(&path, session.handle(), pool, stream)?
+        };
+        let reader = Arc::new(reader);
         let data_file = data_options
             .with_footer(footer.clone())
             .open(reader)

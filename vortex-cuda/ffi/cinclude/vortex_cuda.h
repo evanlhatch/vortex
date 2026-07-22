@@ -89,6 +89,20 @@ vx_array_sink *vx_cuda_array_sink_open_file_with_batch_rows(const vx_session *se
                                                             vx_error **error_out);
 
 /**
+ * Options for scanning a CUDA-compatible Vortex file.
+ *
+ * Zero-initialize this struct to use buffered file I/O and layout-derived scan batches.
+ */
+typedef struct vx_cuda_scan_options {
+    /** Bypass the operating system page cache for data-plane reads.
+     * Footer and zone-map reads remain buffered. Supported only on Linux. */
+    bool direct_io;
+    /** Number of rows in each output `ArrowDeviceArray`.
+     * Zero uses layout-derived splitting. */
+    size_t batch_rows;
+} vx_cuda_scan_options;
+
+/**
  * Scan a local CUDA-compatible Vortex file as an Arrow C Device stream.
  *
  * Files written by `vx_cuda_array_sink_open_file` are compatible with this path. Reusing the same
@@ -113,6 +127,20 @@ int vx_cuda_scan_path_arrow_device_stream_with_batch_rows(
     const vx_session *session,
     vx_view path,
     size_t batch_rows,
+    struct ArrowDeviceArrayStream *out_stream,
+    vx_error **error_out);
+
+/**
+ * Scan a local CUDA-compatible Vortex file with explicit options.
+ *
+ * This has the same ownership and file compatibility requirements as
+ * `vx_cuda_scan_path_arrow_device_stream`. Pass NULL or a zero-initialized options struct to use
+ * buffered file I/O and layout-derived scan batches.
+ */
+int vx_cuda_scan_path_arrow_device_stream_with_options(
+    const vx_session *session,
+    vx_view path,
+    const vx_cuda_scan_options *options,
     struct ArrowDeviceArrayStream *out_stream,
     vx_error **error_out);
 
