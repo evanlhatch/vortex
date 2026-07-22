@@ -49,6 +49,20 @@ use vortex_ffi::vx_view;
 const VX_CUDA_OK: c_int = 0;
 const VX_CUDA_ERR: c_int = 1;
 
+/// Options for scanning a CUDA-compatible Vortex file.
+///
+/// Zero-initialize this struct to use buffered file I/O and layout-derived batch splitting.
+#[repr(C)]
+#[derive(Default)]
+pub struct vx_cuda_scan_options {
+    /// Bypass the operating system page cache for data-plane reads.
+    ///
+    /// Footer and zone-map reads remain buffered. Direct I/O is supported only on Linux.
+    pub direct_io: bool,
+    /// Number of rows in each output batch. Zero uses layout-derived splitting.
+    pub batch_rows: usize,
+}
+
 /// Return a Vortex session with a [`CudaSession`] session variable.
 ///
 /// If `session` already has CUDA support, this returns a clone of it. Otherwise it
@@ -142,7 +156,7 @@ pub unsafe extern "C-unwind" fn vx_cuda_array_sink_open_file_block_rows(
     })
 }
 
-/// Scan a local Vortex file and export an Arrow C Device stream.
+/// Scan a local Vortex file with buffered I/O and export an Arrow C Device stream.
 ///
 /// Footer and zone-map reads remain on the host. Data segments are staged through pinned host
 /// buffers and transferred directly to the GPU.
@@ -171,7 +185,13 @@ pub unsafe extern "C-unwind" fn vx_cuda_scan_path_arrow_device_stream(
     error_out: *mut *mut vx_error,
 ) -> c_int {
     unsafe {
-        vx_cuda_scan_path_arrow_device_stream_batch_rows(session, path, 0, out_stream, error_out)
+        vx_cuda_scan_path_arrow_device_stream_with_options(
+            session,
+            path,
+            ptr::null(),
+            out_stream,
+            error_out,
+        )
     }
 }
 
@@ -196,13 +216,58 @@ pub unsafe extern "C-unwind" fn vx_cuda_scan_path_arrow_device_stream_batch_rows
     out_stream: *mut ArrowDeviceArrayStream,
     error_out: *mut *mut vx_error,
 ) -> c_int {
+    let options = vx_cuda_scan_options {
+        batch_rows,
+        ..Default::default()
+    };
+    unsafe {
+        vx_cuda_scan_path_arrow_device_stream_with_options(
+            session,
+            path,
+            &raw const options,
+            out_stream,
+            error_out,
+        )
+    }
+}
+
+/// Scan a local Vortex file with explicit options and export an Arrow C Device stream.
+///
+/// This has the same ownership and file compatibility requirements as
+/// [`vx_cuda_scan_path_arrow_device_stream`]. Pass a null `options` pointer or a zero-initialized
+/// [`vx_cuda_scan_options`] to use buffered file I/O and layout-derived batch splitting.
+///
+/// # Safety
+///
+/// `session` must be a valid borrowed handle created by `vortex-ffi`. `path` must be valid for the
+/// duration of this call and contain UTF-8. `options`, when non-null, must point to a valid
+/// [`vx_cuda_scan_options`]. `out_stream` must be a valid writable pointer. If `error_out` is
+/// non-null, it must be valid for writing one error pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn vx_cuda_scan_path_arrow_device_stream_with_options(
+    session: *const vx_session,
+    path: vx_view,
+    options: *const vx_cuda_scan_options,
+    out_stream: *mut ArrowDeviceArrayStream,
+    error_out: *mut *mut vx_error,
+) -> c_int {
     try_or(error_out, VX_CUDA_ERR, || {
         vortex_ensure!(!out_stream.is_null(), "null ArrowDeviceArrayStream output");
 
         let path = unsafe { path.as_str() }?.to_owned();
         let session = session_with_cuda(unsafe { vx_session_ref(session) }?)?;
+        let (direct_io, batch_rows) = if options.is_null() {
+            (false, 0)
+        } else {
+            let options = unsafe { &*options };
+            (options.direct_io, options.batch_rows)
+        };
         let array_stream = ffi_runtime().block_on(async {
-            let file = session.open_options().with_cuda().open_path(path).await?;
+            let mut options = session.open_options().with_cuda();
+            if direct_io {
+                options = options.with_direct_io();
+            }
+            let file = options.open_path(path).await?;
             let scan = file.scan()?;
             let scan = if batch_rows == 0 {
                 scan
@@ -320,6 +385,13 @@ mod tests {
     use vortex_cuda_macros::test as cuda_test;
 
     use super::*;
+
+    #[test]
+    fn scan_options_default_to_buffered_io() {
+        let options = vx_cuda_scan_options::default();
+        assert!(!options.direct_io);
+        assert_eq!(options.batch_rows, 0);
+    }
 
     fn test_session(session: VortexSession) -> *mut vx_session {
         Box::into_raw(Box::new(session)).cast::<vx_session>()

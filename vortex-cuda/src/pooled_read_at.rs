@@ -3,6 +3,8 @@
 
 use std::fs::File;
 use std::io;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -15,6 +17,14 @@ use object_store::GetResultPayload;
 use object_store::ObjectStore;
 use object_store::ObjectStoreExt;
 use object_store::path::Path as ObjectPath;
+#[cfg(target_os = "linux")]
+use rustix::fs::AtFlags;
+#[cfg(target_os = "linux")]
+use rustix::fs::Mode;
+#[cfg(target_os = "linux")]
+use rustix::fs::OFlags;
+#[cfg(target_os = "linux")]
+use rustix::fs::StatxFlags;
 use vortex::array::buffer::BufferHandle;
 use vortex::buffer::Alignment;
 use vortex::buffer::ByteBuffer;
@@ -35,6 +45,26 @@ pub const DEFAULT_FILE_CONCURRENCY: usize = 32;
 /// Default number of concurrent requests to allow for object store I/O.
 pub const DEFAULT_OBJECT_STORE_CONCURRENCY: usize = 192;
 
+#[cfg(target_os = "linux")]
+const FALLBACK_DIRECT_IO_ALIGNMENT: usize = 4096;
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct DirectIoAlignment {
+    memory: usize,
+    offset: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl Default for DirectIoAlignment {
+    fn default() -> Self {
+        Self {
+            memory: FALLBACK_DIRECT_IO_ALIGNMENT,
+            offset: FALLBACK_DIRECT_IO_ALIGNMENT,
+        }
+    }
+}
+
 /// File reader that uses CUDA pinned host memory for I/O buffers and transfers
 /// directly to the GPU.
 ///
@@ -50,6 +80,9 @@ pub struct PooledFileReadAt {
     handle: Handle,
     pool: Arc<PinnedByteBufferPool>,
     stream: VortexCudaStream,
+    direct_io: bool,
+    #[cfg(target_os = "linux")]
+    direct_io_alignment: DirectIoAlignment,
 }
 
 impl PooledFileReadAt {
@@ -69,7 +102,55 @@ impl PooledFileReadAt {
             handle,
             pool,
             stream,
+            direct_io: false,
+            #[cfg(target_os = "linux")]
+            direct_io_alignment: DirectIoAlignment::default(),
         })
+    }
+
+    /// Open a file for pooled direct I/O with direct device transfer.
+    ///
+    /// Direct I/O bypasses the operating system page cache. Unaligned logical reads are widened
+    /// to aligned physical reads and sliced to the requested range after transfer to the device.
+    #[cfg(target_os = "linux")]
+    pub fn open_direct(
+        path: impl AsRef<Path>,
+        handle: Handle,
+        pool: Arc<PinnedByteBufferPool>,
+        stream: VortexCudaStream,
+    ) -> VortexResult<Self> {
+        let path = path.as_ref();
+        let uri = Arc::from(path.to_string_lossy().to_string());
+        let file = File::from(
+            rustix::fs::open(
+                path,
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECT,
+                Mode::empty(),
+            )
+            .map_err(io::Error::from)?,
+        );
+        let direct_io_alignment = direct_io_alignment(&file);
+        let file = Arc::new(file);
+        Ok(Self {
+            uri,
+            file,
+            handle,
+            pool,
+            stream,
+            direct_io: true,
+            direct_io_alignment,
+        })
+    }
+
+    /// Return an error when direct I/O is requested on an unsupported platform.
+    #[cfg(not(target_os = "linux"))]
+    pub fn open_direct(
+        _path: impl AsRef<Path>,
+        _handle: Handle,
+        _pool: Arc<PinnedByteBufferPool>,
+        _stream: VortexCudaStream,
+    ) -> VortexResult<Self> {
+        vortex::error::vortex_bail!("direct CUDA file I/O is only supported on Linux")
     }
 }
 
@@ -105,22 +186,164 @@ impl VortexReadAt for PooledFileReadAt {
         let handle = self.handle.clone();
         let stream = self.stream.clone();
         let pool = Arc::clone(&self.pool);
+        let direct_io = self.direct_io;
+        #[cfg(target_os = "linux")]
+        let direct_io_alignment = self.direct_io_alignment;
 
         async move {
-            let mut target = pool.get(length)?;
+            #[cfg(target_os = "linux")]
+            let (read_offset, read_length, requested_range) = if direct_io {
+                direct_io_range(offset, length, direct_io_alignment.offset)?
+            } else {
+                (offset, length, 0..length)
+            };
+            #[cfg(not(target_os = "linux"))]
+            let (read_offset, read_length, requested_range) = {
+                vortex_ensure!(
+                    !direct_io,
+                    "direct CUDA file I/O is only supported on Linux"
+                );
+                (offset, length, 0..length)
+            };
+            #[cfg(target_os = "linux")]
+            let required_bytes = requested_range.end;
+
+            let mut target = pool.get(read_length)?;
             let target = handle
                 .spawn_blocking(move || {
-                    read_exact_at(&file, target.as_mut_slice(), offset)?;
+                    #[cfg(target_os = "linux")]
+                    if direct_io {
+                        let address = target.as_mut_slice().as_ptr() as usize;
+                        if !address.is_multiple_of(direct_io_alignment.memory) {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!(
+                                    "pinned buffer address {address:#x} is not aligned to {} bytes",
+                                    direct_io_alignment.memory
+                                ),
+                            ));
+                        }
+
+                        let bytes_read = read_direct_at(
+                            &file,
+                            target.as_mut_slice(),
+                            read_offset,
+                            required_bytes,
+                            direct_io_alignment,
+                        )?;
+                        target.truncate(bytes_read);
+                    } else {
+                        read_exact_at(&file, target.as_mut_slice(), read_offset)?;
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    read_exact_at(&file, target.as_mut_slice(), read_offset)?;
                     Ok::<_, io::Error>(target)
                 })
                 .await
                 .map_err(VortexError::from)?;
 
             let cuda_buf = target.transfer_to_device(&stream)?;
-            Ok(BufferHandle::new_device(Arc::new(cuda_buf)))
+            Ok(BufferHandle::new_device(Arc::new(cuda_buf)).slice(requested_range))
         }
         .boxed()
     }
+}
+
+#[cfg(target_os = "linux")]
+fn direct_io_range(
+    offset: u64,
+    length: usize,
+    alignment: usize,
+) -> VortexResult<(u64, usize, std::ops::Range<usize>)> {
+    vortex_ensure!(alignment > 0, "direct I/O alignment must be non-zero");
+    let alignment_u64 = u64::try_from(alignment)?;
+    let length_u64 = u64::try_from(length)?;
+    offset.checked_add(length_u64).ok_or_else(|| {
+        vortex_err!("direct I/O range overflow: offset={offset}, length={length}")
+    })?;
+    let read_offset = offset / alignment_u64 * alignment_u64;
+    let prefix = usize::try_from(offset - read_offset)?;
+    let requested_end = prefix.checked_add(length).ok_or_else(|| {
+        vortex_err!("direct I/O range overflow: offset={offset}, length={length}")
+    })?;
+    let read_length = requested_end
+        .checked_add(alignment - 1)
+        .ok_or_else(|| vortex_err!("direct I/O aligned length overflow"))?
+        / alignment
+        * alignment;
+
+    Ok((read_offset, read_length, prefix..requested_end))
+}
+
+#[cfg(target_os = "linux")]
+fn read_direct_at(
+    file: &File,
+    buffer: &mut [u8],
+    offset: u64,
+    required_bytes: usize,
+    alignment: DirectIoAlignment,
+) -> io::Result<usize> {
+    let mut filled = 0;
+    while filled < required_bytes {
+        let filled_u64 = u64::try_from(filled)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "read offset overflow"))?;
+        let read_offset = offset
+            .checked_add(filled_u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "read offset overflow"))?;
+        let bytes_read = match file.read_at(&mut buffer[filled..], read_offset) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if bytes_read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "direct read returned {filled} bytes, but {required_bytes} bytes were required"
+                ),
+            ));
+        }
+        filled += bytes_read;
+        if filled < required_bytes
+            && (!filled.is_multiple_of(alignment.offset)
+                || !filled.is_multiple_of(alignment.memory))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "direct read returned an unaligned short read of {filled} bytes before the required {required_bytes} bytes"
+                ),
+            ));
+        }
+    }
+
+    Ok(filled)
+}
+
+#[cfg(target_os = "linux")]
+fn direct_io_alignment(file: &File) -> DirectIoAlignment {
+    let Ok(stat) = rustix::fs::statx(
+        file,
+        c"",
+        AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
+        StatxFlags::DIOALIGN,
+    ) else {
+        return DirectIoAlignment::default();
+    };
+    if stat.stx_mask & StatxFlags::DIOALIGN.bits() == 0 {
+        return DirectIoAlignment::default();
+    }
+
+    let Ok(memory) = usize::try_from(stat.stx_dio_mem_align) else {
+        return DirectIoAlignment::default();
+    };
+    let Ok(offset) = usize::try_from(stat.stx_dio_offset_align) else {
+        return DirectIoAlignment::default();
+    };
+    if memory == 0 || offset == 0 {
+        return DirectIoAlignment::default();
+    }
+
+    DirectIoAlignment { memory, offset }
 }
 
 /// Object store reader that uses CUDA pinned host memory for I/O buffers and
@@ -348,5 +571,27 @@ impl VortexReadAt for PooledByteBufferReadAt {
             Ok(BufferHandle::new_device(Arc::new(cuda_buf)))
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn widens_unaligned_direct_read_to_block_boundaries() -> VortexResult<()> {
+        assert_eq!(direct_io_range(5, 10, 4096)?, (0, 4096, 5..15));
+        assert_eq!(direct_io_range(4090, 20, 4096)?, (0, 8192, 4090..4110));
+        assert_eq!(direct_io_range(4096, 4096, 4096)?, (4096, 4096, 0..4096));
+        assert_eq!(direct_io_range(513, 1, 512)?, (512, 512, 1..2));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejects_overflowing_direct_read_range() {
+        assert!(direct_io_range(u64::MAX, 2, 4096).is_err());
     }
 }
