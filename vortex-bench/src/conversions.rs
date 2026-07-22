@@ -38,6 +38,7 @@ use vortex::array::stream::ArrayStreamExt;
 use vortex::compressor::BtrBlocksCompressorBuilder;
 use vortex::dtype::DType;
 use vortex::dtype::FieldPath;
+use vortex::dtype::PType;
 use vortex::dtype::StructFields;
 use vortex::dtype::extension::ExtDType;
 use vortex::dtype::extension::ExtDTypeRef;
@@ -50,6 +51,8 @@ use vortex::layout::LayoutStrategy;
 use vortex::layout::layouts::chunked::writer::ChunkedLayoutStrategy;
 use vortex::layout::layouts::compressed::CompressingStrategy;
 use vortex::layout::layouts::flat::writer::FlatLayoutStrategy;
+use vortex::layout::layouts::zoned::experimental::SkipIndex;
+use vortex::layout::layouts::zoned::writer::ZonedLayoutOptions;
 use vortex::session::VortexSession;
 use vortex::utils::aliases::hash_set::HashSet;
 use vortex_arrow::FromArrowArray;
@@ -64,6 +67,11 @@ use wkb::writer::write_geometry;
 use crate::CompactionStrategy;
 use crate::Format;
 use crate::SESSION;
+use crate::experimental_bloom_index;
+use crate::experimental_ngram_index;
+use crate::experimental_ngram_zone_len;
+use crate::experimental_skip_indexes_enabled;
+use crate::format_data_dir;
 use crate::utils::file::idempotent_async;
 
 /// Memory budget per concurrent conversion stream in GB. This is somewhat arbitary.
@@ -157,7 +165,7 @@ pub async fn convert_parquet_file_to_vortex(
         .open(output_path)
         .await?;
 
-    write_options_for(compaction, &dtype, is_spatialbench(parquet_path))
+    write_options_for(compaction, &dtype, is_spatialbench(parquet_path))?
         .write(
             &mut output_file,
             ArrayStreamExt::boxed(ArrayStreamAdapter::new(dtype, stream)),
@@ -181,7 +189,7 @@ fn write_options_for(
     compaction: CompactionStrategy,
     dtype: &DType,
     skip_binary_dict: bool,
-) -> VortexWriteOptions {
+) -> anyhow::Result<VortexWriteOptions> {
     let binary_fields: Vec<_> = match dtype {
         DType::Struct(fields, _) if skip_binary_dict => fields
             .names()
@@ -192,8 +200,11 @@ fn write_options_for(
             .collect(),
         _ => Vec::new(),
     };
-    if binary_fields.is_empty() {
-        return compaction.apply_options(SESSION.write_options());
+    if binary_fields.is_empty()
+        && (!experimental_skip_indexes_enabled()
+            || matches!(compaction, CompactionStrategy::Compact))
+    {
+        return Ok(compaction.apply_options(SESSION.write_options()));
     }
 
     let mut builder = WriteStrategyBuilder::default();
@@ -204,7 +215,34 @@ fn write_options_for(
     for name in binary_fields {
         builder = builder.with_field_writer(FieldPath::from_name(name), no_dict_layout());
     }
-    SESSION.write_options().with_strategy(builder.build())
+
+    if experimental_skip_indexes_enabled()
+        && matches!(compaction, CompactionStrategy::Default)
+        && let DType::Struct(fields, _) = dtype
+    {
+        let exact = experimental_bloom_index();
+        let ngram = experimental_ngram_index();
+        for (name, field_dtype) in fields.names().iter().zip(fields.fields()) {
+            let (index, block_size): (&dyn SkipIndex, _) = match (name.as_ref(), &field_dtype) {
+                ("UserID", DType::Primitive(PType::I64, _)) => (
+                    &exact,
+                    std::num::NonZeroUsize::new(8192).unwrap_or(std::num::NonZeroUsize::MIN),
+                ),
+                ("URL" | "Title" | "url" | "text" | "file_path", DType::Utf8(_)) => {
+                    (&ngram, experimental_ngram_zone_len())
+                }
+                _ => continue,
+            };
+            let options = ZonedLayoutOptions {
+                block_size,
+                ..Default::default()
+            }
+            .with_skip_index(index, &field_dtype, &SESSION)?;
+            builder = builder.with_field_zoned_options(FieldPath::from_name(name.clone()), options);
+        }
+    }
+
+    Ok(SESSION.write_options().with_strategy(builder.build()))
 }
 
 /// A chunked + compressed layout that skips dictionary encoding for opaque `Binary` blobs.
@@ -227,11 +265,16 @@ pub async fn convert_parquet_directory_to_vortex(
     compaction: CompactionStrategy,
 ) -> anyhow::Result<()> {
     let (format, dir_name) = match compaction {
-        CompactionStrategy::Compact => (Format::VortexCompact, Format::VortexCompact.name()),
-        CompactionStrategy::Default => (Format::OnDiskVortex, Format::OnDiskVortex.name()),
+        CompactionStrategy::Compact => (
+            Format::VortexCompact,
+            Format::VortexCompact.name().to_string(),
+        ),
+        CompactionStrategy::Default => {
+            (Format::OnDiskVortex, format_data_dir(Format::OnDiskVortex))
+        }
     };
 
-    let vortex_dir = input_path.join(dir_name);
+    let vortex_dir = input_path.join(&dir_name);
     let parquet_path = input_path.join(Format::Parquet.name());
     create_dir_all(&vortex_dir).await?;
 

@@ -11,6 +11,7 @@
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -42,7 +43,10 @@ def main():
 
     # Formats to capture (vortex formats only, not parquet/duckdb)
     # Note: "vortex" CLI arg maps to "vortex-file-compressed" directory name
+    experimental_vortex_dir = os.environ.get("VORTEX_EXPERIMENTAL_SKIP_INDEX_DIR")
     formats_to_capture = {"vortex-file-compressed", "vortex-compact"}
+    if experimental_vortex_dir:
+        formats_to_capture.add(experimental_vortex_dir)
 
     records = []
 
@@ -54,9 +58,14 @@ def main():
             if not format_dir.is_dir():
                 continue
 
-            format_name = format_dir.name
-            if format_name not in formats_to_capture:
+            directory_name = format_dir.name
+            if directory_name not in formats_to_capture:
                 continue
+            format_name = (
+                "vortex-file-compressed"
+                if directory_name == experimental_vortex_dir
+                else directory_name
+            )
 
             # Extract scale factor from path (e.g., "1.0" for tpch/1.0/vortex-file-compressed)
             # Default to "1.0" if no intermediate directory (e.g., clickbench)

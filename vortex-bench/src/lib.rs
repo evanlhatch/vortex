@@ -6,6 +6,8 @@
 
 use std::clone::Clone;
 use std::fmt::Display;
+use std::num::NonZeroU8;
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
@@ -72,6 +74,11 @@ pub use output::create_output_writer;
 use vortex::VortexSessionDefault;
 pub use vortex::error::vortex_panic;
 use vortex::io::session::RuntimeSessionExt;
+use vortex::layout::layouts::zoned::experimental::BloomOptions;
+use vortex::layout::layouts::zoned::experimental::BloomSkipIndex;
+use vortex::layout::layouts::zoned::experimental::NGramBloomOptions;
+use vortex::layout::layouts::zoned::experimental::NGramBloomSkipIndex;
+use vortex::layout::layouts::zoned::experimental::SkipIndex;
 use vortex::session::VortexSession;
 
 // All benchmarks run with mimalloc for consistency.
@@ -81,8 +88,72 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 pub static SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
     let session = VortexSession::default().with_tokio();
     vortex_geo::initialize(&session);
+    if experimental_skip_indexes_enabled() {
+        experimental_bloom_index().register(&session);
+        experimental_ngram_index().register(&session);
+    }
     session
 });
+
+/// Whether benchmark files should be written and read with the experimental skipping indexes.
+pub fn experimental_skip_indexes_enabled() -> bool {
+    std::env::var("VORTEX_EXPERIMENTAL_SKIP_INDEX").is_ok_and(|value| value == "1")
+}
+
+/// Exact-value bloom index used by the benchmark experiment.
+pub fn experimental_bloom_index() -> BloomSkipIndex {
+    BloomSkipIndex::default()
+}
+
+/// N-gram bloom index used by the benchmark experiment, with environment-tunable sizing.
+pub fn experimental_ngram_index() -> NGramBloomSkipIndex {
+    let defaults = NGramBloomOptions::default();
+    let bytes =
+        experimental_nonzero_usize("VORTEX_EXPERIMENTAL_NGRAM_BYTES", defaults.bloom().bytes());
+    let hashes = experimental_nonzero_u8(
+        "VORTEX_EXPERIMENTAL_NGRAM_HASHES",
+        defaults.bloom().hashes(),
+    );
+    let gram_size = experimental_nonzero_u8("VORTEX_EXPERIMENTAL_NGRAM_SIZE", defaults.gram_size());
+    NGramBloomSkipIndex::new(NGramBloomOptions::new(
+        BloomOptions::new(bytes, hashes),
+        gram_size,
+    ))
+}
+
+/// Zone length used by string n-gram indexes in the benchmark experiment.
+pub fn experimental_ngram_zone_len() -> NonZeroUsize {
+    experimental_nonzero_usize(
+        "VORTEX_EXPERIMENTAL_NGRAM_ZONE_LEN",
+        NonZeroUsize::new(1024).unwrap_or(NonZeroUsize::MIN),
+    )
+}
+
+fn experimental_nonzero_usize(name: &str, default: NonZeroUsize) -> NonZeroUsize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .and_then(NonZeroUsize::new)
+        .unwrap_or(default)
+}
+
+fn experimental_nonzero_u8(name: &str, default: NonZeroU8) -> NonZeroU8 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .and_then(NonZeroU8::new)
+        .unwrap_or(default)
+}
+
+/// Physical data directory for a benchmark format, with an optional side-by-side local override.
+pub fn format_data_dir(format: Format) -> String {
+    if format == Format::OnDiskVortex && experimental_skip_indexes_enabled() {
+        std::env::var("VORTEX_EXPERIMENTAL_SKIP_INDEX_DIR")
+            .unwrap_or_else(|_| format.name().to_string())
+    } else {
+        format.name().to_string()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Target {

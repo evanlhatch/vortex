@@ -52,6 +52,7 @@ use crate::sequence::SequentialStreamExt;
 ///
 /// The input stream is assumed to already be partitioned into one chunk per zone, except
 /// possibly the final partial zone.
+#[derive(Clone)]
 pub struct ZonedLayoutOptions {
     /// The size of a statistics block
     pub block_size: NonZeroUsize,
@@ -196,7 +197,10 @@ impl LayoutStrategy for ZonedStrategy {
     }
 }
 
-fn default_zoned_aggregate_fns(dtype: &DType, session: &VortexSession) -> Arc<[AggregateFnRef]> {
+pub(super) fn default_zoned_aggregate_fns(
+    dtype: &DType,
+    session: &VortexSession,
+) -> Arc<[AggregateFnRef]> {
     let (max, min) = match dtype {
         DType::Utf8(_) | DType::Binary(_) => (
             BoundedMax.bind(BoundedMaxOptions {

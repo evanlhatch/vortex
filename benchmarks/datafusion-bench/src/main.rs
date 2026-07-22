@@ -42,6 +42,7 @@ use vortex_bench::conversions::convert_parquet_directory_to_vortex;
 use vortex_bench::create_benchmark;
 use vortex_bench::create_output_writer;
 use vortex_bench::display::DisplayFormat;
+use vortex_bench::format_data_dir;
 use vortex_bench::runner::BenchmarkMode;
 use vortex_bench::runner::BenchmarkQueryResult;
 use vortex_bench::runner::SqlBenchmarkRunner;
@@ -262,7 +263,9 @@ async fn register_benchmark_tables<B: Benchmark + ?Sized>(
             register_v2_tables(session, benchmark, format).await
         }
         _ => {
-            let benchmark_base = benchmark.data_url().join(&format!("{}/", format.name()))?;
+            let benchmark_base = benchmark
+                .data_url()
+                .join(&format!("{}/", format_data_dir(format)))?;
             let file_format = format_to_df_format(format);
 
             for table in benchmark.table_specs().iter() {

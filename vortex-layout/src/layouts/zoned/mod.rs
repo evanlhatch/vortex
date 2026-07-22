@@ -12,6 +12,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 mod builder;
+pub mod experimental;
 mod pruning;
 mod reader;
 mod schema;
