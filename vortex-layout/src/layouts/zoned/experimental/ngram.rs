@@ -50,6 +50,7 @@ use super::BloomPartial;
 use super::SkipIndex;
 use super::bloom_contains_bytes;
 use super::bloom_insert_bytes;
+use super::diagnostics_enabled;
 
 /// Persisted tuning for a bloom filter populated with every byte n-gram in a UTF-8 zone.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -474,10 +475,6 @@ fn literal_runs(pattern: &str) -> Vec<Vec<u8>> {
         runs.push(current);
     }
     runs
-}
-
-fn diagnostics_enabled() -> bool {
-    std::env::var("VORTEX_EXPERIMENTAL_SKIP_INDEX_DIAGNOSTICS").is_ok_and(|value| value == "1")
 }
 
 #[cfg(test)]

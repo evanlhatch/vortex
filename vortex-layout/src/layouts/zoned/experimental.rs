@@ -372,23 +372,45 @@ impl ScalarFnVTable for BloomContains {
 
         let validity = filters.varbinview_validity();
         let valid = validity.execute_mask(filters.len(), ctx)?;
+        let mut possible = Vec::with_capacity(filters.len());
+        let mut set_bits = 0u64;
+        let mut valid_zones = 0usize;
         for (idx, is_valid) in valid.iter().enumerate() {
             if is_valid {
+                let filter = filters.bytes_at(idx);
                 vortex_ensure!(
-                    filters.bytes_at(idx).len() == options.bytes.get(),
+                    filter.len() == options.bytes.get(),
                     "stored bloom byte length does not match options"
                 );
-            }
-        }
-        let bits = BitBuffer::from_iter(valid.iter().enumerate().map(|(idx, is_valid)| {
-            is_valid
-                && bloom_contains(
-                    filters.bytes_at(idx).as_slice(),
+                set_bits += filter
+                    .as_slice()
+                    .iter()
+                    .map(|byte| u64::from(byte.count_ones()))
+                    .sum::<u64>();
+                valid_zones += 1;
+                possible.push(bloom_contains(
+                    filter.as_slice(),
                     needle,
                     options.hashes.get(),
-                )
-        }));
-        Ok(BoolArray::new(bits, validity).into_array())
+                ));
+            } else {
+                possible.push(false);
+            }
+        }
+        if diagnostics_enabled() && valid_zones > 0 {
+            let total_bits = valid_zones as f64 * options.bytes.get() as f64 * 8.0;
+            let possible_zones = possible.iter().filter(|value| **value).count();
+            tracing::info!(
+                target: "vortex_layout::skip_index",
+                index = "bloom",
+                needle,
+                zones = valid_zones,
+                definitely_absent_zones = valid_zones - possible_zones,
+                average_fill_ratio = set_bits as f64 / total_bits,
+                "experimental skip-index probe"
+            );
+        }
+        Ok(BoolArray::new(BitBuffer::from_iter(possible), validity).into_array())
     }
 
     fn is_null_sensitive(&self, _options: &Self::Options) -> bool {
@@ -511,6 +533,10 @@ fn splitmix64(mut value: u64) -> u64 {
     value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     value ^ (value >> 31)
+}
+
+pub(super) fn diagnostics_enabled() -> bool {
+    std::env::var("VORTEX_EXPERIMENTAL_SKIP_INDEX_DIAGNOSTICS").is_ok_and(|value| value == "1")
 }
 
 #[cfg(test)]
