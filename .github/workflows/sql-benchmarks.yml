@@ -544,15 +544,6 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(inputs.benchmark_profile == 'base' && inputs.base_benchmark_matrix || inputs.benchmark_matrix) }}
-        exclude:
-          - id: appian-nvme
-          - id: polarsignals
-          - id: statpopgen
-          - id: tpcds-nvme
-          - id: tpch-nvme
-          - id: tpch-nvme-10
-          - id: tpch-s3
-          - id: tpch-s3-10
 
     runs-on: >-
       ${{ github.repository == 'vortex-data/vortex'
