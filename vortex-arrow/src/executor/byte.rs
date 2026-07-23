@@ -19,11 +19,29 @@ use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::NativePType;
 use vortex_array::dtype::Nullability;
+use vortex_array::matcher::Matcher;
 use vortex_error::VortexError;
 use vortex_error::VortexResult;
 
 use crate::byte_view::execute_varbinview_to_arrow;
+use crate::executor::reveal_for_export;
 use crate::executor::validity::to_arrow_null_buffer;
+
+/// Matches `VarBin`, which [`to_arrow_byte_array`] converts to the offset-based Arrow layout
+/// without a VarBinView round-trip.
+struct VarBinExportable;
+
+impl Matcher for VarBinExportable {
+    type Match<'a> = &'a ArrayRef;
+
+    fn matches(array: &ArrayRef) -> bool {
+        array.is::<VarBin>()
+    }
+
+    fn try_match(array: &ArrayRef) -> Option<Self::Match<'_>> {
+        Self::matches(array).then_some(array)
+    }
+}
 
 /// Convert a Vortex array into an Arrow GenericBinaryArray.
 pub(super) fn to_arrow_byte_array<T: ByteArrayType>(
@@ -33,13 +51,15 @@ pub(super) fn to_arrow_byte_array<T: ByteArrayType>(
 where
     T::Offset: NativePType,
 {
-    // If the Vortex array is already in VarBin format, we can directly convert it.
-    if let Some(array) = array.as_opt::<VarBin>() {
-        return varbin_to_byte_array::<T>(array, ctx);
+    let array = reveal_for_export::<VarBinExportable>(array, ctx)?;
+
+    // If the Vortex array is in VarBin format, we can directly convert it.
+    if let Some(varbin) = array.as_opt::<VarBin>() {
+        return varbin_to_byte_array::<T>(varbin, ctx);
     }
 
-    // Otherwise, we execute the array to a VarBinViewArray and convert to Arrow ByteView,
-    // then cast to the target byte array type.
+    // Otherwise, the array is canonical: convert to Arrow ByteView, then cast to the target
+    // byte array type.
     let varbinview = array.execute::<VarBinViewArray>(ctx)?;
     let binary_view = match varbinview.dtype() {
         DType::Utf8(_) => execute_varbinview_to_arrow::<StringViewType>(&varbinview, ctx),
@@ -84,8 +104,13 @@ mod tests {
     use vortex_array::IntoArray;
     use vortex_array::VortexSessionExecute;
     use vortex_array::array_session;
+    use vortex_array::arrays::BoolArray;
+    use vortex_array::arrays::VarBinArray;
+    use vortex_array::arrays::scalar_fn::ScalarFnFactoryExt;
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
+    use vortex_array::scalar_fn::EmptyOptions;
+    use vortex_array::scalar_fn::fns::mask::Mask as MaskFn;
     use vortex_error::VortexResult;
     use vortex_mask::Mask;
 
@@ -185,6 +210,39 @@ mod tests {
         assert!(!arrow.is_null(0));
         assert!(arrow.is_null(1));
         assert!(!arrow.is_null(2));
+    }
+
+    #[test]
+    fn mask_wrapped_varbin_exports_via_varbin_fast_path() -> VortexResult<()> {
+        let session = array_session();
+        let mut ctx = session.create_execution_ctx();
+
+        let varbin = VarBinArray::from_vec(
+            vec!["hello", "world", "vortex"],
+            DType::Utf8(Nullability::NonNullable),
+        );
+        let bytes_ptr = varbin.bytes().as_slice().as_ptr();
+        let mask = BoolArray::from_iter([true, false, true]);
+        let masked =
+            MaskFn.try_new_array(3, EmptyOptions, [varbin.into_array(), mask.into_array()])?;
+
+        let field = Field::new("s", DataType::Utf8, true);
+        let arrow = session
+            .arrow()
+            .execute_arrow(masked, Some(&field), &mut ctx)?;
+
+        let strings = arrow.as_string::<i32>();
+        assert_eq!(strings.len(), 3);
+        assert!(!strings.is_null(0));
+        assert!(strings.is_null(1));
+        assert_eq!(strings.value(0), "hello");
+        assert_eq!(strings.value(2), "vortex");
+
+        // The mask execute-parent kernel reveals the VarBin encoding (validity only), so the
+        // conversion shares the data buffer instead of round-tripping through VarBinView and
+        // `arrow_cast`.
+        assert_eq!(strings.values().as_ptr(), bytes_ptr);
+        Ok(())
     }
 
     #[test]

@@ -6,15 +6,19 @@ use vortex_session::VortexSession;
 use crate::ArrayVTable;
 use crate::arrays::Dict;
 use crate::arrays::Filter;
+use crate::arrays::Slice;
 use crate::arrays::VarBin;
 use crate::arrays::dict::TakeExecuteAdaptor;
 use crate::arrays::filter::FilterExecuteAdaptor;
+use crate::arrays::slice::SliceExecuteAdaptor;
 use crate::optimizer::kernels::ArrayKernelsExt;
 use crate::scalar_fn::ScalarFnVTable;
 use crate::scalar_fn::fns::binary::Binary;
 use crate::scalar_fn::fns::binary::CompareExecuteAdaptor;
 use crate::scalar_fn::fns::cast::Cast;
 use crate::scalar_fn::fns::cast::CastExecuteAdaptor;
+use crate::scalar_fn::fns::mask::Mask;
+use crate::scalar_fn::fns::mask::MaskExecuteAdaptor;
 
 pub(crate) fn initialize(session: &VortexSession) {
     let kernels = session.kernels();
@@ -22,4 +26,6 @@ pub(crate) fn initialize(session: &VortexSession) {
     kernels.register_execute_parent_kernel(Binary.id(), VarBin, CompareExecuteAdaptor(VarBin));
     kernels.register_execute_parent_kernel(Filter.id(), VarBin, FilterExecuteAdaptor(VarBin));
     kernels.register_execute_parent_kernel(Dict.id(), VarBin, TakeExecuteAdaptor(VarBin));
+    kernels.register_execute_parent_kernel(Mask.id(), VarBin, MaskExecuteAdaptor(VarBin));
+    kernels.register_execute_parent_kernel(Slice.id(), VarBin, SliceExecuteAdaptor(VarBin));
 }

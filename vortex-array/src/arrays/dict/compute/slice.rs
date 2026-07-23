@@ -7,6 +7,7 @@ use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 
 use crate::ArrayRef;
+use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::array::ArrayView;
 use crate::arrays::Constant;
@@ -15,11 +16,22 @@ use crate::arrays::Dict;
 use crate::arrays::DictArray;
 use crate::arrays::Primitive;
 use crate::arrays::dict::DictArraySlotsExt;
+use crate::arrays::slice::SliceKernel;
 use crate::arrays::slice::SliceReduce;
 use crate::expr::stats::Precision;
 use crate::expr::stats::Stat;
 use crate::scalar::Scalar;
 use crate::scalar::ScalarValue;
+
+impl SliceKernel for Dict {
+    fn slice(
+        array: ArrayView<'_, Self>,
+        range: Range<usize>,
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<ArrayRef>> {
+        <Dict as SliceReduce>::slice(array, range)
+    }
+}
 
 impl SliceReduce for Dict {
     fn slice(array: ArrayView<'_, Self>, range: Range<usize>) -> VortexResult<Option<ArrayRef>> {

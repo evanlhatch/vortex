@@ -22,14 +22,36 @@ use vortex_array::builtins::ArrayBuiltins;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::FieldNames;
 use vortex_array::dtype::StructFields;
+use vortex_array::matcher::Matcher;
 use vortex_array::scalar_fn::fns::pack::Pack;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 
 use crate::ArrowArrayExecutor;
 use crate::dtype::FromArrowType;
+use crate::executor::reveal_for_export;
 use crate::executor::validity::to_arrow_null_buffer;
 use crate::session::ArrowSessionExt;
+
+/// Matches the shapes [`to_arrow_struct`] short-circuits on: `Struct`, `Chunked`
+/// (chunk-of-struct swizzled to struct-of-chunk), and the `pack` scalar function.
+struct StructExportable;
+
+impl Matcher for StructExportable {
+    type Match<'a> = &'a ArrayRef;
+
+    fn matches(array: &ArrayRef) -> bool {
+        array.is::<Struct>()
+            || array.is::<Chunked>()
+            || array
+                .as_opt::<ScalarFn>()
+                .is_some_and(|scalar_fn| scalar_fn.scalar_fn().as_opt::<Pack>().is_some())
+    }
+
+    fn try_match(array: &ArrayRef) -> Option<Self::Match<'_>> {
+        Self::matches(array).then_some(array)
+    }
+}
 
 pub(super) fn to_arrow_struct(
     array: ArrayRef,
@@ -37,6 +59,8 @@ pub(super) fn to_arrow_struct(
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrowArrayRef> {
     let len = array.len();
+
+    let array = reveal_for_export::<StructExportable>(array, ctx)?;
 
     // If the array is chunked, then we invert the chunk-of-struct to struct-of-chunk.
     let array = match array.try_downcast::<Chunked>() {
@@ -196,6 +220,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrays::varbinview::VarBinViewArray;
+    use arrow_array::Array;
     use arrow_array::ArrayRef;
     use arrow_array::PrimitiveArray as ArrowPrimitiveArray;
     use arrow_array::StringViewArray;
@@ -209,9 +234,13 @@ mod tests {
     use vortex_array::VortexSessionExecute;
     use vortex_array::array_session;
     use vortex_array::arrays;
+    use vortex_array::arrays::BoolArray;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::arrays::StructArray;
+    use vortex_array::arrays::scalar_fn::ScalarFnFactoryExt;
     use vortex_array::dtype::FieldNames;
+    use vortex_array::scalar_fn::EmptyOptions;
+    use vortex_array::scalar_fn::fns::mask::Mask;
     use vortex_array::validity::Validity;
     use vortex_buffer::buffer;
     use vortex_error::VortexResult;
@@ -336,6 +365,44 @@ mod tests {
                 .execute_arrow(Some(&arrow_dtype), &mut ctx)?,
             &arrow_array
         );
+        Ok(())
+    }
+
+    #[test]
+    fn mask_wrapped_struct_exports_via_struct_fast_path() -> VortexResult<()> {
+        let mut ctx = array_session().create_execution_ctx();
+        // A struct behind a lazy `mask` scalar-fn nulling out row 1 — the shape a scan
+        // produces when a row mask is applied to a top-level struct batch.
+        let xs = PrimitiveArray::new(buffer![1i64, 2, 3], Validity::NonNullable);
+        let struct_array = StructArray::try_new(
+            FieldNames::from(["xs"]),
+            vec![xs.into_array()],
+            3,
+            Validity::NonNullable,
+        )?;
+        let mask = BoolArray::from_iter([true, false, true]);
+        let masked = Mask.try_new_array(
+            3,
+            EmptyOptions,
+            [struct_array.into_array(), mask.into_array()],
+        )?;
+
+        let arrow = masked.execute_arrow(None, &mut ctx)?;
+
+        let arrow_struct = arrow
+            .as_any()
+            .downcast_ref::<ArrowStructArray>()
+            .expect("struct array");
+        assert_eq!(arrow_struct.len(), 3);
+        assert!(!arrow_struct.is_null(0));
+        assert!(arrow_struct.is_null(1));
+        assert!(!arrow_struct.is_null(2));
+        let xs_col = arrow_struct
+            .column(0)
+            .as_any()
+            .downcast_ref::<ArrowPrimitiveArray<arrow_array::types::Int64Type>>()
+            .expect("int64 column");
+        assert_eq!(xs_col.values(), &[1, 2, 3]);
         Ok(())
     }
 

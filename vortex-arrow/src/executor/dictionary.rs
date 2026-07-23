@@ -18,11 +18,29 @@ use vortex_array::arrays::ConstantArray;
 use vortex_array::arrays::Dict;
 use vortex_array::arrays::DictArray;
 use vortex_array::arrays::dict::DictArraySlotsExt;
+use vortex_array::matcher::Matcher;
 use vortex_error::VortexError;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 
 use crate::ArrowArrayExecutor;
+use crate::executor::reveal_for_export;
+
+/// Matches the encodings [`to_arrow_dictionary`] converts directly — `Dict` and `Constant` —
+/// avoiding a decode-then-re-encode round trip through `arrow_cast`.
+struct DictExportable;
+
+impl Matcher for DictExportable {
+    type Match<'a> = &'a ArrayRef;
+
+    fn matches(array: &ArrayRef) -> bool {
+        array.is::<Dict>() || array.is::<Constant>()
+    }
+
+    fn try_match(array: &ArrayRef) -> Option<Self::Match<'_>> {
+        Self::matches(array).then_some(array)
+    }
+}
 
 pub(super) fn to_arrow_dictionary(
     array: ArrayRef,
@@ -30,6 +48,8 @@ pub(super) fn to_arrow_dictionary(
     values_type: &DataType,
     ctx: &mut ExecutionCtx,
 ) -> VortexResult<ArrowArrayRef> {
+    let array = reveal_for_export::<DictExportable>(array, ctx)?;
+
     let array = match array.try_downcast::<Dict>() {
         Ok(dict) => return dict_to_dict(dict, codes_type, values_type, ctx),
         Err(array) => array,
@@ -141,6 +161,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_array::DictionaryArray as ArrowDictArray;
+    use arrow_array::StringArray;
     use arrow_array::types::UInt8Type;
     use arrow_array::types::UInt32Type;
     use arrow_schema::DataType;
@@ -148,12 +169,17 @@ mod tests {
     use vortex_array::IntoArray;
     use vortex_array::VortexSessionExecute;
     use vortex_array::array_session;
+    use vortex_array::arrays::BoolArray;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::arrays::VarBinViewArray;
+    use vortex_array::arrays::scalar_fn::ScalarFnFactoryExt;
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability::Nullable;
     use vortex_array::scalar::Scalar;
+    use vortex_array::scalar_fn::EmptyOptions;
+    use vortex_array::scalar_fn::fns::mask::Mask;
     use vortex_buffer::buffer;
+    use vortex_error::VortexExpect;
     use vortex_error::VortexResult;
 
     use crate::ArrowArrayExecutor;
@@ -222,6 +248,34 @@ mod tests {
     ) -> VortexResult<()> {
         let actual = execute(input, &target_type)?;
         assert_eq!(expected.as_ref(), actual.as_ref());
+        Ok(())
+    }
+
+    #[test]
+    fn mask_wrapped_dict_exports_via_dict_fast_path() -> VortexResult<()> {
+        // Dictionary with an unreferenced value behind a lazy `mask` scalar-fn. The Dict
+        // fast path preserves the values array verbatim, while the fallback would decode
+        // and re-encode the dictionary through `arrow_cast`, dropping the unused entry.
+        let dict = DictArray::try_new(
+            buffer![0u8, 1, 0].into_array(),
+            VarBinViewArray::from_iter_str(["a", "b", "unused"]).into_array(),
+        )?;
+        let mask = BoolArray::from_iter([true, false, true]);
+        let masked = Mask.try_new_array(3, EmptyOptions, [dict.into_array(), mask.into_array()])?;
+
+        let actual = execute(masked, &dict_type(DataType::UInt8, DataType::Utf8))?;
+
+        let expected: arrow_array::ArrayRef = Arc::new(ArrowDictArray::<UInt8Type>::try_new(
+            vec![Some(0u8), None, Some(0)].into_iter().collect(),
+            Arc::new(StringArray::from(vec!["a", "b", "unused"])),
+        )?);
+        assert_eq!(expected.as_ref(), actual.as_ref());
+
+        let actual_dict = actual
+            .as_any()
+            .downcast_ref::<ArrowDictArray<UInt8Type>>()
+            .vortex_expect("dictionary array");
+        assert_eq!(actual_dict.values().len(), 3);
         Ok(())
     }
 }

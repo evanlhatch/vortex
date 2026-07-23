@@ -6,11 +6,13 @@ use std::ops::Range;
 use vortex_error::VortexResult;
 
 use crate::ArrayRef;
+use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::array::ArrayView;
 use crate::arrays::List;
 use crate::arrays::ListArray;
 use crate::arrays::list::ListArrayExt;
+use crate::arrays::slice::SliceKernel;
 use crate::arrays::slice::SliceReduce;
 
 impl SliceReduce for List {
@@ -23,5 +25,15 @@ impl SliceReduce for List {
             )
             .into_array(),
         ))
+    }
+}
+
+impl SliceKernel for List {
+    fn slice(
+        array: ArrayView<'_, Self>,
+        range: Range<usize>,
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<ArrayRef>> {
+        <List as SliceReduce>::slice(array, range)
     }
 }

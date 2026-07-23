@@ -4,11 +4,13 @@
 use vortex_error::VortexResult;
 
 use crate::ArrayRef;
+use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::array::ArrayView;
 use crate::arrays::List;
 use crate::arrays::ListArray;
 use crate::arrays::list::ListArrayExt;
+use crate::scalar_fn::fns::mask::MaskKernel;
 use crate::scalar_fn::fns::mask::MaskReduce;
 use crate::validity::Validity;
 
@@ -20,5 +22,15 @@ impl MaskReduce for List {
             array.validity()?.and(Validity::Array(mask.clone()))?,
         )
         .map(|a| Some(a.into_array()))
+    }
+}
+
+impl MaskKernel for List {
+    fn mask(
+        array: ArrayView<'_, List>,
+        mask: &ArrayRef,
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<ArrayRef>> {
+        <List as MaskReduce>::mask(array, mask)
     }
 }

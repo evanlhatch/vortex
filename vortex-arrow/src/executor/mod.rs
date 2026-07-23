@@ -38,6 +38,7 @@ use vortex_array::arrays::list::ListArrayExt;
 use vortex_array::arrays::varbin::VarBinArrayExt;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::PType;
+use vortex_array::matcher::Matcher;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
@@ -115,6 +116,23 @@ impl ArrowArrayExecutor for ArrayRef {
             .map(|a| a?.execute_record_batch(schema, ctx))
             .try_collect()
     }
+}
+
+/// Reveal an exporter fast-path encoding hidden under wrapper arrays before conversion.
+///
+/// Exporters have fast paths for non-canonical encodings (`List`, `VarBin`, `Dict`, `RunEnd`,
+/// `Chunked`, `Constant`, ...) that a one-shot downcast misses whenever a wrapper (a lazy
+/// `mask` scalar-fn, `Slice`, `Filter`, ...) sits on top of them. Executing until the matcher
+/// `M` is revealed at the root gives the execute-parent kernels a chance to peel such
+/// wrappers off before the exporter commits to its canonicalize-then-recode fallback.
+///
+/// The returned array is not guaranteed to match `M`: if execution converges to a canonical
+/// form the caller should run its canonical fallback conversion.
+pub(crate) fn reveal_for_export<M: Matcher>(
+    array: ArrayRef,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<ArrayRef> {
+    array.execute_until::<M>(ctx)
 }
 
 /// Execute an arbitrary Vortex array into an Arrow array, dispatched by [`DataType`]. This pathway

@@ -4,11 +4,13 @@
 use vortex_error::VortexResult;
 
 use crate::ArrayRef;
+use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::array::ArrayView;
 use crate::arrays::VarBin;
 use crate::arrays::VarBinArray;
 use crate::arrays::varbin::VarBinArrayExt;
+use crate::scalar_fn::fns::mask::MaskKernel;
 use crate::scalar_fn::fns::mask::MaskReduce;
 use crate::validity::Validity;
 
@@ -23,6 +25,16 @@ impl MaskReduce for VarBin {
             )?
             .into_array(),
         ))
+    }
+}
+
+impl MaskKernel for VarBin {
+    fn mask(
+        array: ArrayView<'_, VarBin>,
+        mask: &ArrayRef,
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<ArrayRef>> {
+        <VarBin as MaskReduce>::mask(array, mask)
     }
 }
 
