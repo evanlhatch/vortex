@@ -42,6 +42,7 @@ use vortex::scan::PartitionRef;
 use vortex::scan::PartitionStream;
 use vortex::scan::ScanRequest;
 use vortex::scan::selection::Selection;
+use vortex::session::VortexSession;
 use vortex_arrow::ArrowSessionExt;
 
 use crate::POOL;
@@ -55,7 +56,7 @@ use crate::session::session_ref;
 /// realized as a stream), actively streaming partitions, or finished.
 #[allow(dead_code)]
 pub(crate) enum NativeScan {
-    Pending(Box<dyn DataSourceScan>),
+    Pending(Box<dyn DataSourceScan>, VortexSession),
     Started(PartitionStream),
     Finished,
 }
@@ -182,7 +183,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeScan_create(
         )?;
 
         let scan = RUNTIME.block_on(async { ds.inner().scan(request).await })?;
-        Ok(Box::into_raw(Box::new(NativeScan::Pending(scan))) as jlong)
+        Ok(Box::into_raw(Box::new(NativeScan::Pending(scan, ds.session().clone()))) as jlong)
     })
 }
 
@@ -211,10 +212,10 @@ pub extern "system" fn Java_dev_vortex_jni_NativeScan_arrowSchema(
             throw_runtime!("null arrow schema address");
         }
         let scan = unsafe { &*(pointer as *const NativeScan) };
-        let NativeScan::Pending(scan) = scan else {
+        let NativeScan::Pending(scan, session) = scan else {
             throw_runtime!("schema unavailable: scan already started");
         };
-        export_dtype_to_arrow(scan.dtype(), schema_addr)?;
+        export_dtype_to_arrow(scan.dtype(), &session.arrow(), schema_addr)?;
         Ok(())
     });
 }
@@ -229,7 +230,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeScan_partitionCount(
 ) {
     try_or_throw(&mut env, |env| {
         let scan = unsafe { &*(pointer as *const NativeScan) };
-        let NativeScan::Pending(scan) = scan else {
+        let NativeScan::Pending(scan, _) = scan else {
             throw_runtime!("partition count unavailable: scan already started");
         };
         let (rows, cardinality) = match scan.partition_count() {
@@ -260,7 +261,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeScan_nextPartition(
         ptr::write(slot, NativeScan::Finished);
 
         let mut stream = match owned {
-            NativeScan::Pending(scan) => scan.partitions(),
+            NativeScan::Pending(scan, _) => scan.partitions(),
             NativeScan::Started(stream) => stream,
             NativeScan::Finished => return Ok(0),
         };

@@ -28,7 +28,9 @@ use vortex::io::filesystem::FileSystemRef;
 use vortex::io::runtime::BlockingRuntime;
 use vortex::io::session::RuntimeSessionExt;
 use vortex::scan::DataSourceRef;
+use vortex::session::VortexSession;
 use vortex::utils::aliases::hash_map::HashMap;
+use vortex_arrow::ArrowSessionExt;
 
 use crate::RUNTIME;
 use crate::dtype::export_dtype_to_arrow;
@@ -38,9 +40,11 @@ use crate::io::JavaFileSystem;
 use crate::object_store::object_store_fs;
 use crate::session::session_ref;
 
-/// Wraps an `Arc<dyn DataSource>` behind a single pointer.
+/// Wraps an `Arc<dyn DataSource>` behind a single pointer, together with the session it was
+/// opened with (used for schema/array conversions on later JNI calls).
 pub(crate) struct NativeDataSource {
     inner: DataSourceRef,
+    session: VortexSession,
 }
 
 impl NativeDataSource {
@@ -56,6 +60,10 @@ impl NativeDataSource {
 
     pub(crate) fn inner(&self) -> &DataSourceRef {
         &self.inner
+    }
+
+    pub(crate) fn session(&self) -> &VortexSession {
+        &self.session
     }
 }
 
@@ -113,7 +121,11 @@ pub extern "system" fn Java_dev_vortex_jni_NativeDataSource_open(
         let inner = RUNTIME
             .block_on(builder.build())
             .map(|ds| Arc::new(ds) as DataSourceRef)?;
-        Ok(Box::new(NativeDataSource { inner }).into_raw())
+        Ok(Box::new(NativeDataSource {
+            inner,
+            session: session.clone(),
+        })
+        .into_raw())
     })
 }
 
@@ -184,7 +196,11 @@ pub extern "system" fn Java_dev_vortex_jni_NativeDataSource_openFiles(
         let inner = RUNTIME
             .block_on(builder.build())
             .map(|ds| Arc::new(ds) as DataSourceRef)?;
-        Ok(Box::new(NativeDataSource { inner }).into_raw())
+        Ok(Box::new(NativeDataSource {
+            inner,
+            session: session.clone(),
+        })
+        .into_raw())
     })
 }
 
@@ -221,7 +237,7 @@ pub extern "system" fn Java_dev_vortex_jni_NativeDataSource_arrowSchema(
             throw_runtime!("null arrow schema address");
         }
         let ds = unsafe { NativeDataSource::from_ptr(pointer) };
-        export_dtype_to_arrow(ds.inner.dtype(), schema_addr)?;
+        export_dtype_to_arrow(ds.inner.dtype(), &ds.session.arrow(), schema_addr)?;
         Ok(())
     });
 }
