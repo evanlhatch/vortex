@@ -28,6 +28,8 @@ use vortex_array::buffer::BufferHandle;
 use vortex_array::memory::DefaultHostAllocator;
 use vortex_array::memory::HostAllocatorRef;
 use vortex_buffer::Alignment;
+#[cfg(any(target_os = "linux", test))]
+use vortex_buffer::ByteBuffer;
 use vortex_error::VortexResult;
 #[cfg(any(target_os = "linux", test))]
 use vortex_error::vortex_ensure;
@@ -241,16 +243,19 @@ impl VortexReadAt for FileReadAt {
                             "host buffer address {address:#x} is not aligned to {} bytes",
                             direct_io_constraints.memory_alignment
                         );
-                        read_direct_at(
+                        let initialized = read_direct_at(
                             &file,
                             buffer.as_mut_slice(),
                             direct_range.read_offset,
                             direct_range.requested_range.end,
                             direct_io_constraints,
                         )?;
-                        return Ok(BufferHandle::new_host(
-                            buffer.freeze().slice(direct_range.requested_range),
-                        ));
+                        buffer.as_mut_slice()[initialized..].fill(0);
+                        return Ok(BufferHandle::new_host(slice_direct_io_buffer(
+                            buffer.freeze(),
+                            direct_range.requested_range,
+                            alignment,
+                        )));
                     }
 
                     let mut buffer = allocator.allocate(length, alignment)?;
@@ -261,6 +266,15 @@ impl VortexReadAt for FileReadAt {
         }
         .boxed()
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn slice_direct_io_buffer(
+    buffer: ByteBuffer,
+    requested_range: std::ops::Range<usize>,
+    alignment: Alignment,
+) -> ByteBuffer {
+    buffer.slice_unaligned(requested_range).aligned(alignment)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -447,4 +461,18 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn realigns_an_unaligned_direct_read_slice() -> VortexResult<()> {
+        let range = direct_io_range(352, 1, 512)?;
+        let requested_alignment = Alignment::new(512);
+        let buffer = slice_direct_io_buffer(
+            ByteBuffer::zeroed_aligned(range.read_length, requested_alignment),
+            range.requested_range,
+            requested_alignment,
+        );
+
+        assert_eq!(buffer.len(), 1);
+        assert!(buffer.is_aligned(requested_alignment));
+        Ok(())
+    }
 }
