@@ -8,6 +8,9 @@ pub use array::FilterDataParts;
 pub use vtable::FilterArray;
 
 mod execute;
+pub(crate) use execute::buffer::filter_buffer;
+pub(crate) use execute::byte_compress::filter_buffer as filter_buffer_byte_compress;
+pub(crate) use execute::filter_validity;
 
 mod kernel;
 pub use kernel::FilterExecuteAdaptor;
