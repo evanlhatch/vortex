@@ -4,7 +4,10 @@
 use itertools::Itertools;
 use itertools::MinMaxResult;
 use vortex_buffer::Buffer;
+use vortex_buffer::BufferMut;
 use vortex_error::VortexExpect;
+use vortex_error::VortexResult;
+use vortex_error::vortex_err;
 
 use crate::arrays::DecimalArray;
 use crate::arrays::decimal::DecimalArrayExt;
@@ -25,6 +28,27 @@ pub(crate) fn widened_buffer<W: NativeDecimalType>(array: &DecimalArray) -> Buff
             .iter()
             .map(|v| W::from(*v).vortex_expect("widening decimal cast must succeed"))
             .collect()
+    })
+}
+
+/// Return the array's unscaled values converted to exactly `W`, whatever the array's storage
+/// type: widening is lossless, and narrowing returns an error for any value that does not fit
+/// `W`. Zero-copy when the array is already stored at `W`.
+pub fn converted_buffer<W: NativeDecimalType>(array: &DecimalArray) -> VortexResult<Buffer<W>> {
+    if array.values_type() == W::DECIMAL_TYPE {
+        return Ok(array.buffer::<W>());
+    }
+    match_each_decimal_value_type!(array.values_type(), |T| {
+        let src = array.buffer::<T>();
+        // Collecting `Result`s defeats the size hint (the iterator may stop at the first
+        // error), so pre-size explicitly to keep the conversion a single allocation.
+        let mut out = BufferMut::<W>::with_capacity(src.len());
+        for v in src.iter() {
+            out.push(W::from(*v).ok_or_else(|| {
+                vortex_err!("decimal value {v} does not fit {}", W::DECIMAL_TYPE)
+            })?);
+        }
+        Ok(out.freeze())
     })
 }
 
