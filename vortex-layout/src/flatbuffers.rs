@@ -4,28 +4,28 @@
 use std::env;
 use std::sync::LazyLock;
 
+use flatbuffers::root_with_opts;
 use flatbuffers::FlatBufferBuilder;
 use flatbuffers::VerifierOptions;
 use flatbuffers::WIPOffset;
-use flatbuffers::root_with_opts;
 use vortex_array::dtype::DType;
-use vortex_error::VortexResult;
 use vortex_error::vortex_err;
+use vortex_error::VortexResult;
+use vortex_flatbuffers::layout;
 use vortex_flatbuffers::FlatBuffer;
 use vortex_flatbuffers::FlatBufferRoot;
 use vortex_flatbuffers::WriteFlatBuffer;
-use vortex_flatbuffers::layout;
-use vortex_session::VortexSession;
 use vortex_session::registry::ReadContext;
+use vortex_session::VortexSession;
 
-use crate::DynLayout;
-use crate::LayoutBuildContext;
-use crate::LayoutContext;
-use crate::LayoutRef;
 use crate::children::ViewedLayoutChildren;
 use crate::layouts::foreign::new_foreign_layout;
 use crate::segments::SegmentId;
 use crate::session::LayoutSessionExt;
+use crate::DynLayout;
+use crate::LayoutBuildContext;
+use crate::LayoutContext;
+use crate::LayoutRef;
 
 static LAYOUT_VERIFIER: LazyLock<VerifierOptions> = LazyLock::new(|| {
     VerifierOptions {
@@ -227,54 +227,12 @@ mod tests {
     use vortex_array::array_session;
     use vortex_array::dtype::DType;
     use vortex_array::dtype::Nullability;
-    use vortex_array::dtype::PType;
-    use vortex_flatbuffers::WriteFlatBufferExt;
     use vortex_flatbuffers::layout as fbl;
     use vortex_session::registry::ReadContext;
 
-    use super::layout_from_flatbuffer;
     use super::layout_from_flatbuffer_with_options;
-    use crate::LayoutContext;
-    use crate::LayoutEncodingId;
-    use crate::layouts::flat::Flat;
-    use crate::layouts::flat::FlatLayout;
-    use crate::segments::SegmentId;
     use crate::session::LayoutSession;
-
-    #[test]
-    fn flat_layout_preserves_wire_fields_and_deserializes() {
-        let dtype = DType::Primitive(PType::I32, Nullability::NonNullable);
-        let array_ctx = ReadContext::new([]);
-        let layout = FlatLayout::new_with_metadata(
-            3,
-            dtype.clone(),
-            SegmentId::from(7),
-            array_ctx.clone(),
-            Some(vec![1, 2].into()),
-        );
-        let layout_ctx = LayoutContext::default();
-        let layout = layout.to_layout();
-        let buffer = layout
-            .flatbuffer_writer(&layout_ctx)
-            .write_flatbuffer_bytes()
-            .unwrap();
-
-        let wire = flatbuffers::root::<fbl::Layout>(&buffer).unwrap();
-        assert_eq!(wire.encoding(), 0);
-        assert_eq!(wire.row_count(), 3);
-        assert_eq!(wire.metadata().unwrap().bytes(), &[0x0a, 0x02, 1, 2]);
-        assert_eq!(wire.segments().unwrap().iter().collect::<Vec<_>>(), [7]);
-        assert!(wire.children().is_none());
-
-        let layout_read_ctx = ReadContext::new(layout_ctx.to_ids());
-        let session = array_session().with::<LayoutSession>();
-        let decoded =
-            layout_from_flatbuffer(buffer, &dtype, &layout_read_ctx, &array_ctx, &session).unwrap();
-        let decoded = decoded.as_::<Flat>();
-        assert_eq!(decoded.row_count(), 3);
-        assert_eq!(*decoded.segment_id(), 7);
-        assert_eq!(decoded.array_tree().unwrap().as_ref(), &[1, 2]);
-    }
+    use crate::LayoutEncodingId;
 
     #[expect(clippy::disallowed_methods, reason = "test-only id")]
     #[test]

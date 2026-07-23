@@ -78,7 +78,7 @@ impl VTable for List {
         args: &LayoutDeserializeArgs<'_>,
         metadata: &ListLayoutMetadata,
     ) -> VortexResult<Self::LayoutData> {
-        validate_children(args.dtype, args.children.nchildren())?;
+        ListLayout::validate_children(args.dtype, args.children.nchildren())?;
         let elements_dtype = args
             .dtype
             .as_list_element_opt()
@@ -162,7 +162,7 @@ impl Layout<List> {
         let offsets_ptype = offsets.dtype().as_ptype();
         let mut children = vec![elements, offsets];
         children.extend(validity);
-        validate_children(&dtype, children.len()).vortex_expect("invalid list children");
+        Self::validate_children(&dtype, children.len()).vortex_expect("invalid list children");
         LayoutParts::new(
             List,
             dtype,
@@ -203,13 +203,15 @@ impl Layout<List> {
             .as_list_element_opt()
             .vortex_expect("ListLayout dtype must be a List")
     }
+
+    fn validate_children(dtype: &DType, nchildren: usize) -> VortexResult<()> {
+        let expected = NUM_CHILDREN_NON_NULLABLE + usize::from(dtype.is_nullable());
+        vortex_ensure_eq!(nchildren, expected);
+        Ok(())
+    }
 }
 
-fn validate_children(dtype: &DType, nchildren: usize) -> VortexResult<()> {
-    let expected = NUM_CHILDREN_NON_NULLABLE + usize::from(dtype.is_nullable());
-    vortex_ensure_eq!(nchildren, expected);
-    Ok(())
-}
+
 
 #[derive(prost::Message)]
 pub struct ListLayoutMetadata {

@@ -282,24 +282,34 @@ impl<V: VTable> From<Layout<V>> for LayoutRef {
 pub trait DynLayout: 'static + Send + Sync + Debug {
     /// Returns this layout as [`Any`] for downcasting.
     fn as_any(&self) -> &dyn Any;
+
     /// Clone this layout as an erased reference.
     fn dyn_to_layout(&self) -> LayoutRef;
+
     /// Returns the layout ID.
     fn dyn_encoding_id(&self) -> LayoutId;
+
     /// Returns the row count.
     fn dyn_row_count(&self) -> u64;
+
     /// Returns the logical dtype.
     fn dyn_dtype(&self) -> &DType;
+
     /// Returns the number of children.
     fn dyn_nchildren(&self) -> usize;
+
     /// Returns child `idx`.
     fn dyn_child(&self, idx: usize) -> VortexResult<LayoutRef>;
+
     /// Returns the relationship of child `idx`.
     fn dyn_child_type(&self, idx: usize) -> LayoutChildType;
+
     /// Serializes layout-specific metadata.
     fn dyn_metadata(&self) -> Vec<u8>;
+
     /// Returns directly referenced segment IDs.
     fn dyn_segment_ids(&self) -> Vec<SegmentId>;
+
     /// Constructs a reader.
     fn dyn_new_reader(
         &self,

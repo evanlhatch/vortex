@@ -63,9 +63,10 @@ impl VTable for Struct {
         args: &LayoutDeserializeArgs<'_>,
         _metadata: &EmptyMetadata,
     ) -> VortexResult<Self::LayoutData> {
-        validate_children(args.dtype, args.children.nchildren())?;
+        Layout::<Struct>::validate_children(args.dtype, args.children.nchildren())?;
+
         for idx in 0..args.children.nchildren() {
-            let child_dtype = struct_child_dtype(args.dtype, idx)?;
+            let child_dtype = StructLayout::child_dtype(args.dtype, idx)?;
             let child = args.children.child(idx, &child_dtype)?;
             vortex_ensure!(
                 child.row_count() == args.row_count,
@@ -76,7 +77,7 @@ impl VTable for Struct {
     }
 
     fn child_dtype(layout: &Layout<Self>, index: usize) -> VortexResult<DType> {
-        struct_child_dtype(layout.dtype(), index)
+        StructLayout::child_dtype(layout.dtype(), index)
     }
 
     fn child_type(layout: &Layout<Self>, idx: usize) -> LayoutChildType {
@@ -118,7 +119,7 @@ impl VTable for Struct {
 impl Layout<Struct> {
     /// Construct a struct layout from owned children.
     pub fn new(row_count: u64, dtype: DType, children: Vec<LayoutRef>) -> Self {
-        validate_children(&dtype, children.len()).vortex_expect("invalid struct children");
+        Self::validate_children(&dtype, children.len()).vortex_expect("invalid struct children");
         LayoutParts::new(
             Struct,
             dtype,
@@ -164,32 +165,35 @@ impl Layout<Struct> {
         }
         Ok(())
     }
-}
 
-fn validate_children(dtype: &DType, nchildren: usize) -> VortexResult<()> {
-    let fields = dtype
-        .as_struct_fields_opt()
-        .ok_or_else(|| vortex_err!("Expected struct dtype"))?;
-    let expected = fields.nfields() + usize::from(dtype.is_nullable());
-    vortex_ensure!(
+    fn validate_children(dtype: &DType, nchildren: usize) -> VortexResult<()> {
+        let fields = dtype
+            .as_struct_fields_opt()
+            .ok_or_else(|| vortex_err!("Expected struct dtype"))?;
+        let expected = fields.nfields() + usize::from(dtype.is_nullable());
+        vortex_ensure!(
         nchildren == expected,
         "Struct layout has {nchildren} children, expected {expected}"
     );
-    Ok(())
-}
+        Ok(())
+    }
 
-fn struct_child_dtype(dtype: &DType, index: usize) -> VortexResult<DType> {
-    let schema_index = if dtype.is_nullable() {
-        index.saturating_sub(1)
-    } else {
-        index
-    };
-    if index == 0 && dtype.is_nullable() {
-        Ok(DType::Bool(Nullability::NonNullable))
-    } else {
-        dtype
-            .as_struct_fields_opt()
-            .and_then(|fields| fields.field_by_index(schema_index))
-            .ok_or_else(|| vortex_err!("Missing field {schema_index}"))
+    fn child_dtype(dtype: &DType, index: usize) -> VortexResult<DType> {
+        let schema_index = if dtype.is_nullable() {
+            index.saturating_sub(1)
+        } else {
+            index
+        };
+        if index == 0 && dtype.is_nullable() {
+            Ok(DType::Bool(Nullability::NonNullable))
+        } else {
+            dtype
+                .as_struct_fields_opt()
+                .and_then(|fields| fields.field_by_index(schema_index))
+                .ok_or_else(|| vortex_err!("Missing field {schema_index}"))
+        }
     }
 }
+
+
+
