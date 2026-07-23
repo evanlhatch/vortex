@@ -238,8 +238,10 @@ impl Interner {
 
 #[cfg(test)]
 mod tests {
-    use super::{CachedId, Interner};
     use vortex_utils::aliases::hash_set::HashSet;
+
+    use super::CachedId;
+    use super::Interner;
 
     static VALID: CachedId = CachedId::new("vortex.test.valid");
     static INVALID: CachedId = CachedId::new("vortex.test.invalid");
