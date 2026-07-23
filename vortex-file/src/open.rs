@@ -12,6 +12,8 @@ use vortex_buffer::ByteBuffer;
 use vortex_error::VortexError;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+#[cfg(not(target_os = "linux"))]
+use vortex_error::vortex_bail;
 use vortex_error::vortex_err;
 use vortex_io::VortexReadAt;
 use vortex_io::session::RuntimeSessionExt;
@@ -248,18 +250,24 @@ impl VortexOpenOptions {
             return self.open(source).await;
         }
 
-        let mut options = self;
-        if options.footer.is_none() {
-            let buffered =
-                FileReadAt::open_with_allocator(path, handle.clone(), Arc::clone(&allocator))?;
-            let footer = options.read_footer(&buffered).await?.footer;
-            options = options.with_footer(footer);
-        }
+        #[cfg(not(target_os = "linux"))]
+        vortex_bail!("direct file I/O is only supported on Linux");
 
-        let source = Arc::new(FileReadAt::open_direct_with_allocator(
-            path, handle, allocator,
-        )?);
-        options.open(source).await
+        #[cfg(target_os = "linux")]
+        {
+            let mut options = self;
+            if options.footer.is_none() {
+                let buffered =
+                    FileReadAt::open_with_allocator(path, handle.clone(), Arc::clone(&allocator))?;
+                let footer = options.read_footer(&buffered).await?.footer;
+                options = options.with_footer(footer);
+            }
+
+            let source = Arc::new(FileReadAt::open_direct_with_allocator(
+                path, handle, allocator,
+            )?);
+            options.open(source).await
+        }
     }
 
     /// Open a Vortex file from an in-memory buffer.

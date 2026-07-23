@@ -10,6 +10,7 @@ use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::file_format::arrow::ArrowFormat;
 use datafusion::datasource::file_format::csv::CsvFormat;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
+#[cfg(target_os = "linux")]
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::provider::DefaultTableFactory;
 use datafusion::execution::SessionStateBuilder;
@@ -20,21 +21,27 @@ use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::prelude::SessionConfig;
 use datafusion::prelude::SessionContext;
 use datafusion_common::GetExt;
+#[cfg(target_os = "linux")]
 use datafusion_common::Result as DFResult;
 use object_store::ObjectStore;
 use object_store::aws::AmazonS3Builder;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::local::LocalFileSystem;
 use url::Url;
+#[cfg(target_os = "linux")]
 use vortex::array::memory::MemorySessionExt;
+#[cfg(target_os = "linux")]
 use vortex::io::VortexReadAt;
+#[cfg(target_os = "linux")]
 use vortex::io::session::RuntimeSessionExt;
+#[cfg(target_os = "linux")]
 use vortex::io::std_file::FileReadAt;
 use vortex_bench::Format;
 use vortex_bench::SESSION;
 use vortex_datafusion::VortexFormat;
 use vortex_datafusion::VortexFormatFactory;
 use vortex_datafusion::VortexTableOptions;
+#[cfg(target_os = "linux")]
 use vortex_datafusion::reader::VortexReaderFactory;
 
 #[expect(clippy::expect_used)]
@@ -120,6 +127,7 @@ pub fn format_to_df_format(format: Format, source: &Url) -> Arc<dyn FileFormat> 
         Format::Parquet => Arc::new(ParquetFormat::new()),
         Format::OnDiskVortex | Format::VortexCompact | Format::VortexNative => {
             let format = VortexFormat::new_with_options(SESSION.clone(), vortex_table_options());
+            #[cfg(target_os = "linux")]
             let format = if source.scheme() == "file"
                 && std::env::var("VORTEX_DIRECT_IO").is_ok_and(|value| value == "1")
             {
@@ -127,6 +135,8 @@ pub fn format_to_df_format(format: Format, source: &Url) -> Arc<dyn FileFormat> 
             } else {
                 format
             };
+            #[cfg(not(target_os = "linux"))]
+            let _ = source;
             Arc::new(format)
         }
         Format::OnDiskDuckDB | Format::Lance => {
@@ -135,9 +145,11 @@ pub fn format_to_df_format(format: Format, source: &Url) -> Arc<dyn FileFormat> 
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct DirectIoVortexReaderFactory;
 
+#[cfg(target_os = "linux")]
 impl VortexReaderFactory for DirectIoVortexReaderFactory {
     fn create_reader(
         &self,

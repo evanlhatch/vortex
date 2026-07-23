@@ -29,11 +29,9 @@ use vortex_array::memory::DefaultHostAllocator;
 use vortex_array::memory::HostAllocatorRef;
 use vortex_buffer::Alignment;
 use vortex_error::VortexResult;
-#[cfg(not(target_os = "linux"))]
-use vortex_error::vortex_bail;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 use vortex_error::vortex_ensure;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 use vortex_error::vortex_err;
 
 use crate::CoalesceConfig;
@@ -76,23 +74,37 @@ pub fn read_exact_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<
 pub const DEFAULT_CONCURRENCY: usize = 32;
 
 #[cfg(target_os = "linux")]
+/// Conservative direct-I/O alignment used when Linux cannot report the filesystem constraints.
+///
+/// A page-sized fallback is accepted by common block devices and filesystems. If the actual
+/// requirement is stricter, the read fails with the underlying `EINVAL`.
 const FALLBACK_DIRECT_IO_ALIGNMENT: usize = 4096;
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
-struct DirectIoAlignment {
-    memory: usize,
-    offset: usize,
+struct DirectIoConstraints {
+    /// Required alignment of the address of the userspace I/O buffer.
+    memory_alignment: usize,
+    /// Required alignment of both the file offset and the I/O length.
+    offset_alignment: usize,
 }
 
 #[cfg(target_os = "linux")]
-impl Default for DirectIoAlignment {
+impl Default for DirectIoConstraints {
     fn default() -> Self {
         Self {
-            memory: FALLBACK_DIRECT_IO_ALIGNMENT,
-            offset: FALLBACK_DIRECT_IO_ALIGNMENT,
+            memory_alignment: FALLBACK_DIRECT_IO_ALIGNMENT,
+            offset_alignment: FALLBACK_DIRECT_IO_ALIGNMENT,
         }
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, PartialEq, Eq)]
+struct DirectIoRange {
+    read_offset: u64,
+    read_length: usize,
+    requested_range: std::ops::Range<usize>,
 }
 
 /// An adapter type wrapping a [`File`] to implement [`VortexReadAt`].
@@ -104,7 +116,7 @@ pub struct FileReadAt {
     #[cfg(target_os = "linux")]
     direct_io: bool,
     #[cfg(target_os = "linux")]
-    direct_io_alignment: DirectIoAlignment,
+    direct_io_constraints: DirectIoConstraints,
 }
 
 impl FileReadAt {
@@ -130,7 +142,7 @@ impl FileReadAt {
             #[cfg(target_os = "linux")]
             direct_io: false,
             #[cfg(target_os = "linux")]
-            direct_io_alignment: DirectIoAlignment::default(),
+            direct_io_constraints: DirectIoConstraints::default(),
         })
     }
 
@@ -138,6 +150,7 @@ impl FileReadAt {
     ///
     /// This option is supported only on Linux. Unaligned logical reads are widened to satisfy the
     /// filesystem's direct-I/O requirements and sliced back to the requested range.
+    #[cfg(target_os = "linux")]
     pub fn open_direct(path: impl AsRef<Path>, handle: Handle) -> VortexResult<Self> {
         Self::open_direct_with_allocator(path, handle, Arc::new(DefaultHostAllocator))
     }
@@ -161,35 +174,15 @@ impl FileReadAt {
             )
             .map_err(io::Error::from)?,
         );
-        let direct_io_alignment = direct_io_alignment(&file);
-        vortex_ensure!(
-            direct_io_alignment.memory.is_power_of_two(),
-            "direct I/O memory alignment must be a power of two, got {}",
-            direct_io_alignment.memory
-        );
-        vortex_ensure!(
-            direct_io_alignment.offset.is_power_of_two(),
-            "direct I/O offset alignment must be a power of two, got {}",
-            direct_io_alignment.offset
-        );
+        let direct_io_constraints = direct_io_constraints(&file)?;
         Ok(Self {
             uri,
             file: Arc::new(file),
             handle,
             allocator,
             direct_io: true,
-            direct_io_alignment,
+            direct_io_constraints,
         })
-    }
-
-    /// Return an error when direct I/O is requested on an unsupported platform.
-    #[cfg(not(target_os = "linux"))]
-    pub fn open_direct_with_allocator(
-        _path: impl AsRef<Path>,
-        _handle: Handle,
-        _allocator: HostAllocatorRef,
-    ) -> VortexResult<Self> {
-        vortex_bail!("direct file I/O is only supported on Linux")
     }
 }
 
@@ -227,32 +220,36 @@ impl VortexReadAt for FileReadAt {
         #[cfg(target_os = "linux")]
         let direct_io = self.direct_io;
         #[cfg(target_os = "linux")]
-        let direct_io_alignment = self.direct_io_alignment;
+        let direct_io_constraints = self.direct_io_constraints;
         async move {
             handle
                 .spawn_blocking(move || {
                     #[cfg(target_os = "linux")]
                     if direct_io {
-                        let (read_offset, read_length, requested_range) =
-                            direct_io_range(offset, length, direct_io_alignment.offset)?;
+                        let direct_range = direct_io_range(
+                            offset,
+                            length,
+                            direct_io_constraints.offset_alignment,
+                        )?;
                         let allocation_alignment =
-                            Alignment::new(direct_io_alignment.memory.max(*alignment));
-                        let mut buffer = allocator.allocate(read_length, allocation_alignment)?;
+                            Alignment::new(direct_io_constraints.memory_alignment.max(*alignment));
+                        let mut buffer =
+                            allocator.allocate(direct_range.read_length, allocation_alignment)?;
                         let address = buffer.as_mut_slice().as_ptr() as usize;
                         vortex_ensure!(
-                            address.is_multiple_of(direct_io_alignment.memory),
+                            address.is_multiple_of(direct_io_constraints.memory_alignment),
                             "host buffer address {address:#x} is not aligned to {} bytes",
-                            direct_io_alignment.memory
+                            direct_io_constraints.memory_alignment
                         );
                         read_direct_at(
                             &file,
                             buffer.as_mut_slice(),
-                            read_offset,
-                            requested_range.end,
-                            direct_io_alignment,
+                            direct_range.read_offset,
+                            direct_range.requested_range.end,
+                            direct_io_constraints,
                         )?;
                         return Ok(BufferHandle::new_host(
-                            buffer.freeze().slice(requested_range),
+                            buffer.freeze().slice(direct_range.requested_range),
                         ));
                     }
 
@@ -266,30 +263,37 @@ impl VortexReadAt for FileReadAt {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn direct_io_range(
-    offset: u64,
-    length: usize,
-    alignment: usize,
-) -> VortexResult<(u64, usize, std::ops::Range<usize>)> {
+#[cfg(any(target_os = "linux", test))]
+fn direct_io_range(offset: u64, length: usize, alignment: usize) -> VortexResult<DirectIoRange> {
     vortex_ensure!(alignment > 0, "direct I/O alignment must be non-zero");
+    if length == 0 {
+        return Ok(DirectIoRange {
+            read_offset: offset,
+            read_length: 0,
+            requested_range: 0..0,
+        });
+    }
+
     let alignment_u64 = u64::try_from(alignment)?;
     let length_u64 = u64::try_from(length)?;
-    offset.checked_add(length_u64).ok_or_else(|| {
+    let requested_end = offset.checked_add(length_u64).ok_or_else(|| {
         vortex_err!("direct I/O range overflow: offset={offset}, length={length}")
     })?;
-    let read_offset = offset / alignment_u64 * alignment_u64;
-    let prefix = usize::try_from(offset - read_offset)?;
-    let requested_end = prefix.checked_add(length).ok_or_else(|| {
+    let read_offset = offset - offset % alignment_u64;
+    let read_end = requested_end
+        .checked_next_multiple_of(alignment_u64)
+        .ok_or_else(|| vortex_err!("direct I/O aligned end overflow"))?;
+    let read_length = usize::try_from(read_end - read_offset)?;
+    let slice_start = usize::try_from(offset - read_offset)?;
+    let slice_end = slice_start.checked_add(length).ok_or_else(|| {
         vortex_err!("direct I/O range overflow: offset={offset}, length={length}")
     })?;
-    let read_length = requested_end
-        .checked_add(alignment - 1)
-        .ok_or_else(|| vortex_err!("direct I/O aligned length overflow"))?
-        / alignment
-        * alignment;
 
-    Ok((read_offset, read_length, prefix..requested_end))
+    Ok(DirectIoRange {
+        read_offset,
+        read_length,
+        requested_range: slice_start..slice_end,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -298,16 +302,16 @@ fn read_direct_at(
     buffer: &mut [u8],
     offset: u64,
     required_bytes: usize,
-    alignment: DirectIoAlignment,
+    constraints: DirectIoConstraints,
 ) -> io::Result<usize> {
-    let mut filled = 0;
-    while filled < required_bytes {
-        let filled_u64 = u64::try_from(filled)
+    let mut initialized = 0;
+    while initialized < required_bytes {
+        let initialized_u64 = u64::try_from(initialized)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "read offset overflow"))?;
         let read_offset = offset
-            .checked_add(filled_u64)
+            .checked_add(initialized_u64)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "read offset overflow"))?;
-        let bytes_read = match file.read_at(&mut buffer[filled..], read_offset) {
+        let bytes_read = match file.read_at(&mut buffer[initialized..], read_offset) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => result?,
         };
@@ -315,72 +319,132 @@ fn read_direct_at(
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!(
-                    "direct read returned {filled} bytes, but {required_bytes} bytes were required"
+                    "direct read returned {initialized} bytes, but {required_bytes} bytes were required"
                 ),
             ));
         }
-        filled += bytes_read;
-        if filled < required_bytes
-            && (!filled.is_multiple_of(alignment.offset)
-                || !filled.is_multiple_of(alignment.memory))
+        initialized += bytes_read;
+        if initialized < required_bytes
+            && (!initialized.is_multiple_of(constraints.offset_alignment)
+                || !initialized.is_multiple_of(constraints.memory_alignment))
         {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!(
-                    "direct read returned an unaligned short read of {filled} bytes before the required {required_bytes} bytes"
+                    "direct read returned an unaligned short read of {initialized} bytes before the required {required_bytes} bytes"
                 ),
             ));
         }
     }
 
-    Ok(filled)
+    Ok(initialized)
 }
 
 #[cfg(target_os = "linux")]
-fn direct_io_alignment(file: &File) -> DirectIoAlignment {
+fn direct_io_constraints(file: &File) -> VortexResult<DirectIoConstraints> {
     let Ok(stat) = rustix::fs::statx(
         file,
         c"",
         AtFlags::EMPTY_PATH | AtFlags::STATX_DONT_SYNC,
         StatxFlags::DIOALIGN,
     ) else {
-        return DirectIoAlignment::default();
+        return Ok(DirectIoConstraints::default());
     };
     if stat.stx_mask & StatxFlags::DIOALIGN.bits() == 0 {
-        return DirectIoAlignment::default();
+        return Ok(DirectIoConstraints::default());
     }
 
-    let Ok(memory) = usize::try_from(stat.stx_dio_mem_align) else {
-        return DirectIoAlignment::default();
+    let Ok(memory_alignment) = usize::try_from(stat.stx_dio_mem_align) else {
+        return Ok(DirectIoConstraints::default());
     };
-    let Ok(offset) = usize::try_from(stat.stx_dio_offset_align) else {
-        return DirectIoAlignment::default();
+    let Ok(offset_alignment) = usize::try_from(stat.stx_dio_offset_align) else {
+        return Ok(DirectIoConstraints::default());
     };
-    if memory == 0 || offset == 0 {
-        return DirectIoAlignment::default();
+    if memory_alignment == 0 || offset_alignment == 0 {
+        return Ok(DirectIoConstraints::default());
     }
+    vortex_ensure!(
+        memory_alignment.is_power_of_two(),
+        "direct I/O memory alignment must be a power of two, got {memory_alignment}"
+    );
+    vortex_ensure!(
+        offset_alignment.is_power_of_two(),
+        "direct I/O offset alignment must be a power of two, got {offset_alignment}"
+    );
 
-    DirectIoAlignment { memory, offset }
+    Ok(DirectIoConstraints {
+        memory_alignment,
+        offset_alignment,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "linux")]
+    use rstest::rstest;
+
     use super::*;
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn widens_unaligned_direct_read_to_block_boundaries() -> VortexResult<()> {
-        assert_eq!(direct_io_range(5, 10, 4096)?, (0, 4096, 5..15));
-        assert_eq!(direct_io_range(4090, 20, 4096)?, (0, 8192, 4090..4110));
-        assert_eq!(direct_io_range(4096, 4096, 4096)?, (4096, 4096, 0..4096));
-        assert_eq!(direct_io_range(513, 1, 512)?, (512, 512, 1..2));
+    #[rstest]
+    #[case(0, 0, 4096, 0, 0, 0)]
+    #[case(5, 0, 4096, 5, 0, 0)]
+    #[case(5, 10, 4096, 0, 4096, 5)]
+    #[case(4090, 20, 4096, 0, 8192, 4090)]
+    #[case(4096, 4096, 4096, 4096, 4096, 0)]
+    #[case(513, 1, 512, 512, 512, 1)]
+    #[case(4096, 8193, 4096, 4096, 12288, 0)]
+    fn widens_direct_read_to_block_boundaries(
+        #[case] offset: u64,
+        #[case] length: usize,
+        #[case] alignment: usize,
+        #[case] expected_offset: u64,
+        #[case] expected_length: usize,
+        #[case] expected_prefix: usize,
+    ) -> VortexResult<()> {
+        assert_eq!(
+            direct_io_range(offset, length, alignment)?,
+            DirectIoRange {
+                read_offset: expected_offset,
+                read_length: expected_length,
+                requested_range: expected_prefix..expected_prefix + length,
+            }
+        );
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn rejects_overflowing_direct_read_range() {
-        assert!(direct_io_range(u64::MAX, 2, 4096).is_err());
+    #[rstest]
+    #[case(u64::MAX, 2, 4096)]
+    #[case(0, 1, 0)]
+    fn rejects_invalid_direct_read_range(
+        #[case] offset: u64,
+        #[case] length: usize,
+        #[case] alignment: usize,
+    ) {
+        assert!(direct_io_range(offset, length, alignment).is_err());
     }
+
+    #[test]
+    fn aligned_ranges_cover_requested_bytes() -> VortexResult<()> {
+        for alignment in [512, 4096] {
+            for offset in 0..alignment * 2 {
+                for length in [0, 1, alignment - 1, alignment, alignment + 1] {
+                    let range = direct_io_range(offset as u64, length, alignment)?;
+                    if length == 0 {
+                        assert_eq!(range.read_length, 0);
+                        continue;
+                    }
+
+                    assert_eq!(range.read_offset % alignment as u64, 0);
+                    assert_eq!(range.read_length % alignment, 0);
+                    assert_eq!(range.requested_range.len(), length);
+                    assert!(range.requested_range.end <= range.read_length);
+                    assert_eq!(
+                        range.read_offset + range.requested_range.start as u64,
+                        offset as u64
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
 }

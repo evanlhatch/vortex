@@ -79,7 +79,14 @@ impl CudaOpenOptions {
         drop(cuda_session);
 
         let reader = if self.direct_io {
-            PooledFileReadAt::open_direct(&path, session.handle(), pool, stream)?
+            #[cfg(target_os = "linux")]
+            {
+                PooledFileReadAt::open_direct(&path, session.handle(), pool, stream)?
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                vortex_bail!("direct CUDA file I/O is only supported on Linux")
+            }
         } else {
             PooledFileReadAt::open(&path, session.handle(), pool, stream)?
         };
