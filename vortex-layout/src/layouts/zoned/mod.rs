@@ -11,10 +11,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+mod aggregates;
 mod builder;
 mod pruning;
 mod reader;
 mod schema;
+pub mod skip_index;
 pub mod writer;
 pub mod zone_map;
 
