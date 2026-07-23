@@ -4,28 +4,28 @@
 use std::env;
 use std::sync::LazyLock;
 
-use flatbuffers::root_with_opts;
 use flatbuffers::FlatBufferBuilder;
 use flatbuffers::VerifierOptions;
 use flatbuffers::WIPOffset;
+use flatbuffers::root_with_opts;
 use vortex_array::dtype::DType;
-use vortex_error::vortex_err;
 use vortex_error::VortexResult;
-use vortex_flatbuffers::layout;
+use vortex_error::vortex_err;
 use vortex_flatbuffers::FlatBuffer;
 use vortex_flatbuffers::FlatBufferRoot;
 use vortex_flatbuffers::WriteFlatBuffer;
-use vortex_session::registry::ReadContext;
+use vortex_flatbuffers::layout;
 use vortex_session::VortexSession;
+use vortex_session::registry::ReadContext;
 
-use crate::children::ViewedLayoutChildren;
-use crate::layouts::foreign::new_foreign_layout;
-use crate::segments::SegmentId;
-use crate::session::LayoutSessionExt;
 use crate::DynLayout;
 use crate::LayoutBuildContext;
 use crate::LayoutContext;
 use crate::LayoutRef;
+use crate::children::ViewedLayoutChildren;
+use crate::layouts::foreign::new_foreign_layout;
+use crate::segments::SegmentId;
+use crate::session::LayoutSessionExt;
 
 static LAYOUT_VERIFIER: LazyLock<VerifierOptions> = LazyLock::new(|| {
     VerifierOptions {
@@ -231,8 +231,8 @@ mod tests {
     use vortex_session::registry::ReadContext;
 
     use super::layout_from_flatbuffer_with_options;
-    use crate::session::LayoutSession;
     use crate::LayoutEncodingId;
+    use crate::session::LayoutSession;
 
     #[expect(clippy::disallowed_methods, reason = "test-only id")]
     #[test]

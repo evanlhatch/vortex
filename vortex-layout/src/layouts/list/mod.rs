@@ -211,8 +211,6 @@ impl Layout<List> {
     }
 }
 
-
-
 #[derive(prost::Message)]
 pub struct ListLayoutMetadata {
     #[prost(enumeration = "PType", tag = "1")]

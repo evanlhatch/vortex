@@ -172,9 +172,9 @@ impl Layout<Struct> {
             .ok_or_else(|| vortex_err!("Expected struct dtype"))?;
         let expected = fields.nfields() + usize::from(dtype.is_nullable());
         vortex_ensure!(
-        nchildren == expected,
-        "Struct layout has {nchildren} children, expected {expected}"
-    );
+            nchildren == expected,
+            "Struct layout has {nchildren} children, expected {expected}"
+        );
         Ok(())
     }
 
@@ -194,6 +194,3 @@ impl Layout<Struct> {
         }
     }
 }
-
-
-

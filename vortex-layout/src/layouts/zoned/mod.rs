@@ -55,10 +55,10 @@ use crate::VTable;
 use crate::children::OwnedLayoutChildren;
 use crate::layouts::zoned::reader::ZonedReader;
 use crate::layouts::zoned::schema::AggregateSpecProto;
-use crate::layouts::zoned::schema::aggregate_fns_from_specs;
 use crate::layouts::zoned::schema::aggregate_specs_from_fns;
 use crate::layouts::zoned::schema::aggregate_stats_table_dtype;
 use crate::layouts::zoned::schema::legacy_stats_table_dtype;
+use crate::layouts::zoned::schema::try_aggregate_fns_from_specs;
 use crate::segments::SegmentSource;
 
 /// Zoned layout vtable.
@@ -122,7 +122,16 @@ impl VTable for Zoned {
             "ZonedLayout expects exactly 2 children (data, zones)"
         );
         vortex_ensure_eq!(args.children.child_row_count(0), args.row_count);
-        let aggregate_fns = aggregate_fns_from_specs(&metadata.aggregate_specs, args.session)?;
+        let Some(aggregate_fns) =
+            try_aggregate_fns_from_specs(&metadata.aggregate_specs, args.session)?
+        else {
+            args.children.child(0, args.dtype)?;
+            return Ok(ZonedData {
+                zone_len: 0,
+                zone_map_schema: ZoneMapSchema::AggregateFns(Arc::new([])),
+                stats_table_dtype: aggregate_stats_table_dtype(args.dtype, &[]),
+            });
+        };
         aggregate_specs_from_fns(&aggregate_fns)?;
         let stats_table_dtype = aggregate_stats_table_dtype(args.dtype, &aggregate_fns);
         args.children.child(0, args.dtype)?;
@@ -276,6 +285,8 @@ impl ZonedLayout {
         if zones.dtype() != &expected_dtype {
             vortex_bail!("Invalid zone map layout: zones dtype does not match expected dtype");
         }
+
+        // Verify that every aggregate is serializable.
         aggregate_specs_from_fns(&aggregate_fns)?;
 
         let dtype = data.dtype().clone();
@@ -509,7 +520,8 @@ mod tests {
 
         let deserialized = ZonedMetadata::deserialize(&metadata.serialize())?;
         let session = VortexSession::empty().with::<AggregateFnSession>();
-        let aggregate_fns = aggregate_fns_from_specs(&deserialized.aggregate_specs, &session)?;
+        let aggregate_fns = try_aggregate_fns_from_specs(&deserialized.aggregate_specs, &session)?
+            .expect("known aggregates resolve");
 
         assert_eq!(aggregate_fns.as_ref(), std::slice::from_ref(&aggregate_fn));
         Ok(())
@@ -620,6 +632,76 @@ mod tests {
         let result = <Zoned as VTable>::build(
             &ZonedLayoutEncoding,
             &DType::Primitive(PType::I32, Nullability::NonNullable),
+            0,
+            &metadata,
+            vec![],
+            children.as_ref(),
+            &build_ctx,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_unknown_aggregate_disables_pruning_when_allowed() -> VortexResult<()> {
+        let dtype = DType::Primitive(PType::I32, Nullability::NonNullable);
+        let read_ctx = ReadContext::new([]);
+        let children = OwnedLayoutChildren::layout_children(vec![
+            FlatLayout::new(0, dtype.clone(), SegmentId::from(0), read_ctx.clone()).into_layout(),
+            FlatLayout::new(0, dtype.clone(), SegmentId::from(1), read_ctx).into_layout(),
+        ]);
+        let session = vortex_array::array_session();
+        session.allow_unknown();
+        let build_read_ctx = ReadContext::new([]);
+        let build_ctx = LayoutBuildContext {
+            session: &session,
+            array_read_ctx: &build_read_ctx,
+        };
+
+        let metadata = ZonedMetadata {
+            zone_len: 8,
+            aggregate_specs: Arc::new([AggregateSpecProto::new_unknown("vortex.test.unknown")]),
+        };
+
+        let layout = <Zoned as VTable>::build(
+            &ZonedLayoutEncoding,
+            &dtype,
+            0,
+            &metadata,
+            vec![],
+            children.as_ref(),
+            &build_ctx,
+        )?;
+
+        // An unknown aggregate disables zoned pruning (`zone_len == 0`) while leaving the data
+        // child readable, so the index is ignored rather than turned into a hard read error.
+        assert_eq!(layout.zone_len, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_unknown_aggregate_errors_without_allow_unknown() {
+        let dtype = DType::Primitive(PType::I32, Nullability::NonNullable);
+        let read_ctx = ReadContext::new([]);
+        let children = OwnedLayoutChildren::layout_children(vec![
+            FlatLayout::new(0, dtype.clone(), SegmentId::from(0), read_ctx.clone()).into_layout(),
+            FlatLayout::new(0, dtype.clone(), SegmentId::from(1), read_ctx).into_layout(),
+        ]);
+        let session = vortex_array::array_session();
+        let build_read_ctx = ReadContext::new([]);
+        let build_ctx = LayoutBuildContext {
+            session: &session,
+            array_read_ctx: &build_read_ctx,
+        };
+
+        let metadata = ZonedMetadata {
+            zone_len: 8,
+            aggregate_specs: Arc::new([AggregateSpecProto::new_unknown("vortex.test.unknown")]),
+        };
+
+        let result = <Zoned as VTable>::build(
+            &ZonedLayoutEncoding,
+            &dtype,
             0,
             &metadata,
             vec![],

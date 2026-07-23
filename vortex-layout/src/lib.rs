@@ -40,4 +40,4 @@ mod strategy;
 #[cfg(test)]
 mod test;
 
-pub type LayoutContext = Context<LayoutEncodingRef>;
+pub type LayoutContext = Context;
