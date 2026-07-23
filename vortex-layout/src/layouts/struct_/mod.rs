@@ -66,10 +66,9 @@ impl VTable for Struct {
         Layout::<Struct>::validate_children(args.dtype, args.children.nchildren())?;
 
         for idx in 0..args.children.nchildren() {
-            let child_dtype = StructLayout::child_dtype(args.dtype, idx)?;
-            let child = args.children.child(idx, &child_dtype)?;
+            let child_row_count = args.children.child_row_count(idx);
             vortex_ensure!(
-                child.row_count() == args.row_count,
+                child_row_count == args.row_count,
                 "Struct child {idx} row count does not match parent"
             );
         }
