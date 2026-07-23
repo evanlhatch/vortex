@@ -13,21 +13,6 @@ use vortex_array::ArrayContext;
 use vortex_array::IntoArray;
 use vortex_array::VortexSessionExecute;
 use vortex_array::aggregate_fn::AggregateFnRef;
-use vortex_array::aggregate_fn::AggregateFnVTable;
-use vortex_array::aggregate_fn::AggregateFnVTableExt;
-use vortex_array::aggregate_fn::EmptyOptions;
-use vortex_array::aggregate_fn::NumericalAggregateOpts;
-use vortex_array::aggregate_fn::fns::bounded_max::BoundedMax;
-use vortex_array::aggregate_fn::fns::bounded_max::BoundedMaxOptions;
-use vortex_array::aggregate_fn::fns::bounded_min::BoundedMin;
-use vortex_array::aggregate_fn::fns::bounded_min::BoundedMinOptions;
-use vortex_array::aggregate_fn::fns::max::Max;
-use vortex_array::aggregate_fn::fns::min::Min;
-use vortex_array::aggregate_fn::fns::nan_count::NanCount;
-use vortex_array::aggregate_fn::fns::null_count::NullCount;
-use vortex_array::aggregate_fn::fns::sum::Sum;
-use vortex_array::aggregate_fn::session::AggregateFnSessionExt;
-use vortex_array::dtype::DType;
 use vortex_error::VortexError;
 use vortex_error::VortexResult;
 use vortex_io::session::RuntimeSessionExt;
@@ -40,7 +25,7 @@ use crate::LayoutStrategy;
 use crate::layouts::zoned::AggregateStatsAccumulator;
 use crate::layouts::zoned::ZonedLayout;
 use crate::layouts::zoned::aggregate_partials;
-use crate::layouts::zoned::schema::default_bounded_stat_max_bytes;
+use crate::layouts::zoned::aggregates::default_zoned_aggregate_fns;
 use crate::segments::SegmentSinkRef;
 use crate::sequence::SendableSequentialStream;
 use crate::sequence::SequencePointer;
@@ -194,96 +179,5 @@ impl LayoutStrategy for ZonedStrategy {
 
     fn buffered_bytes(&self) -> u64 {
         self.child.buffered_bytes() + self.stats.buffered_bytes()
-    }
-}
-
-pub(super) fn default_zoned_aggregate_fns(
-    dtype: &DType,
-    session: &VortexSession,
-) -> Arc<[AggregateFnRef]> {
-    let (max, min) = match dtype {
-        DType::Utf8(_) | DType::Binary(_) => (
-            BoundedMax.bind(BoundedMaxOptions {
-                max_bytes: default_bounded_stat_max_bytes(),
-            }),
-            BoundedMin.bind(BoundedMinOptions {
-                max_bytes: default_bounded_stat_max_bytes(),
-            }),
-        ),
-        _ => (
-            Max.bind(NumericalAggregateOpts::skip_nans()),
-            Min.bind(NumericalAggregateOpts::skip_nans()),
-        ),
-    };
-
-    let mut aggregate_fns = vec![max, min];
-    if Sum
-        .return_dtype(&NumericalAggregateOpts::skip_nans(), dtype)
-        .is_some()
-    {
-        aggregate_fns.push(Sum.bind(NumericalAggregateOpts::skip_nans()));
-    }
-    aggregate_fns.push(NanCount.bind(EmptyOptions));
-    aggregate_fns.push(NullCount.bind(EmptyOptions));
-
-    // Stats from geo extension types are discovered from the registry at runtime instead.
-    aggregate_fns.extend(session.aggregate_fns().zone_stat_defaults(dtype));
-
-    aggregate_fns.into()
-}
-
-#[cfg(test)]
-mod tests {
-    use vortex_array::aggregate_fn::fns::bounded_max::BoundedMax;
-    use vortex_array::aggregate_fn::fns::bounded_min::BoundedMin;
-    use vortex_array::aggregate_fn::fns::max::Max;
-    use vortex_array::aggregate_fn::fns::min::Min;
-    use vortex_array::aggregate_fn::fns::sum::Sum;
-    use vortex_array::dtype::Nullability;
-    use vortex_array::dtype::PType;
-    use vortex_array::extension::datetime::TimeUnit;
-    use vortex_array::extension::datetime::Timestamp;
-
-    use super::*;
-
-    #[test]
-    fn default_aggregates_bound_variable_length_min_max() {
-        let aggregate_fns = default_zoned_aggregate_fns(
-            &DType::Utf8(Nullability::NonNullable),
-            &vortex_array::array_session(),
-        );
-
-        assert_eq!(
-            aggregate_fns[0].as_::<BoundedMax>().max_bytes,
-            default_bounded_stat_max_bytes()
-        );
-        assert_eq!(
-            aggregate_fns[1].as_::<BoundedMin>().max_bytes,
-            default_bounded_stat_max_bytes()
-        );
-    }
-
-    #[test]
-    fn default_aggregates_keep_fixed_width_min_max_exact() {
-        let aggregate_fns =
-            default_zoned_aggregate_fns(&PType::I32.into(), &vortex_array::array_session());
-
-        assert!(aggregate_fns[0].is::<Max>());
-        assert!(aggregate_fns[1].is::<Min>());
-        assert!(aggregate_fns[2].is::<Sum>());
-    }
-
-    #[test]
-    fn default_aggregates_skip_sum_for_non_summable_dtype() {
-        let dtype = DType::Extension(
-            Timestamp::new(TimeUnit::Microseconds, Nullability::Nullable).erased(),
-        );
-        let aggregate_fns = default_zoned_aggregate_fns(&dtype, &vortex_array::array_session());
-
-        assert!(
-            aggregate_fns
-                .iter()
-                .all(|aggregate_fn| !aggregate_fn.is::<Sum>())
-        );
     }
 }

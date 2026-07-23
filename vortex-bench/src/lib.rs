@@ -72,8 +72,8 @@ pub use output::create_output_writer;
 use vortex::VortexSessionDefault;
 pub use vortex::error::vortex_panic;
 use vortex::io::session::RuntimeSessionExt;
-use vortex::layout::layouts::zoned::skip_index::BloomSkipIndex;
 use vortex::layout::layouts::zoned::skip_index::SkipIndex;
+use vortex::layout::layouts::zoned::skip_index::bloom::BloomSkipIndex;
 use vortex::session::VortexSession;
 
 // All benchmarks run with mimalloc for consistency.
