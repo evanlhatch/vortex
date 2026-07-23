@@ -14,14 +14,16 @@ use vortex_error::vortex_bail;
 use vortex_error::vortex_err;
 use vortex_flatbuffers::FlatBuffer;
 use vortex_flatbuffers::layout as fbl;
+use vortex_session::ArcSwapMap;
 use vortex_session::VortexSession;
+use vortex_session::registry::Id;
 use vortex_session::registry::ReadContext;
 
 use crate::LayoutBuildContext;
+use crate::LayoutEncodingRef;
 use crate::LayoutRef;
 use crate::layouts::foreign::new_foreign_layout;
 use crate::segments::SegmentId;
-use crate::session::LayoutRegistry;
 
 /// Abstract way of accessing the children of a layout.
 ///
@@ -105,7 +107,7 @@ pub(crate) struct ViewedLayoutChildren {
     flatbuffer_loc: usize,
     array_read_ctx: ReadContext,
     layout_read_ctx: ReadContext,
-    layouts: LayoutRegistry,
+    layouts: ArcSwapMap<Id, LayoutEncodingRef>,
     allow_unknown: bool,
     session: VortexSession,
     cache: Arc<[OnceCell<LayoutRef>]>,
@@ -122,7 +124,7 @@ impl ViewedLayoutChildren {
         flatbuffer_loc: usize,
         array_read_ctx: ReadContext,
         layout_read_ctx: ReadContext,
-        layouts: LayoutRegistry,
+        layouts: ArcSwapMap<Id, LayoutEncodingRef>,
         allow_unknown: bool,
         session: VortexSession,
     ) -> Self {
@@ -221,7 +223,7 @@ impl LayoutChildren for ViewedLayoutChildren {
                 .ok_or_else(|| {
                     vortex_err!("Unknown layout encoding index: {}", fb_child.encoding())
                 })?;
-            let Some(encoding) = self.layouts.find(&encoding_id) else {
+            let Some(encoding) = self.layouts.get(&encoding_id) else {
                 if self.allow_unknown {
                     return viewed_children.foreign_layout_from_fb(fb_child, dtype);
                 }
