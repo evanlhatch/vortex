@@ -148,8 +148,6 @@ impl ScalarFnVTable for BloomContains {
         let validity = filters.varbinview_validity();
         let valid = validity.execute_mask(filters.len(), ctx)?;
         let mut possible = Vec::with_capacity(filters.len());
-        let mut set_bits = 0u64;
-        let mut valid_zones = 0usize;
         for (idx, is_valid) in valid.iter().enumerate() {
             if is_valid {
                 let filter = filters.bytes_at(idx);
@@ -157,12 +155,6 @@ impl ScalarFnVTable for BloomContains {
                     filter.len() == options.bytes().get(),
                     "stored bloom byte length does not match options"
                 );
-                set_bits += filter
-                    .as_slice()
-                    .iter()
-                    .map(|byte| u64::from(byte.count_ones()))
-                    .sum::<u64>();
-                valid_zones += 1;
                 possible.push(bloom_contains(
                     filter.as_slice(),
                     needle,
@@ -171,19 +163,6 @@ impl ScalarFnVTable for BloomContains {
             } else {
                 possible.push(false);
             }
-        }
-        if diagnostics_enabled() && valid_zones > 0 {
-            let total_bits = valid_zones as f64 * options.bytes().get() as f64 * 8.0;
-            let possible_zones = possible.iter().filter(|value| **value).count();
-            tracing::info!(
-                target: "vortex_layout::skip_index",
-                index = "bloom",
-                needle,
-                zones = valid_zones,
-                definitely_absent_zones = valid_zones - possible_zones,
-                average_fill_ratio = set_bits as f64 / total_bits,
-                "skip-index probe"
-            );
         }
         Ok(BoolArray::new(BitBuffer::from_iter(possible), validity).into_array())
     }
@@ -234,10 +213,6 @@ impl StatsRewriteRule for BloomEqRewrite {
         let contains = BloomContains.new_expr(self.options.clone(), [filter, literal.clone()]);
         Ok(Some(not(contains)))
     }
-}
-
-fn diagnostics_enabled() -> bool {
-    std::env::var("VORTEX_SKIP_INDEX_DIAGNOSTICS").is_ok_and(|value| value == "1")
 }
 
 #[cfg(test)]

@@ -540,7 +540,6 @@ jobs:
     env:
       VORTEX_EXPERIMENTAL_PATCHED_ARRAY: "1"
       VORTEX_BLOOM_SKIP_INDEX: ${{ inputs.bloom_skip_index && '1' || '' }}
-      VORTEX_SKIP_INDEX_DIAGNOSTICS: ${{ inputs.bloom_skip_index && '1' || '' }}
       VORTEX_BLOOM_SKIP_INDEX_DIR: ${{ inputs.bloom_skip_index && 'vortex-file-bloom' || '' }}
       FLAT_LAYOUT_INLINE_ARRAY_NODE: "1"
       # Makes python output nicer
