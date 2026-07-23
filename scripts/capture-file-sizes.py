@@ -43,10 +43,10 @@ def main():
 
     # Formats to capture (vortex formats only, not parquet/duckdb)
     # Note: "vortex" CLI arg maps to "vortex-file-compressed" directory name
-    experimental_vortex_dir = os.environ.get("VORTEX_EXPERIMENTAL_SKIP_INDEX_DIR")
+    bloom_vortex_dir = os.environ.get("VORTEX_BLOOM_SKIP_INDEX_DIR")
     formats_to_capture = {"vortex-file-compressed", "vortex-compact"}
-    if experimental_vortex_dir:
-        formats_to_capture.add(experimental_vortex_dir)
+    if bloom_vortex_dir:
+        formats_to_capture.add(bloom_vortex_dir)
 
     records = []
 
@@ -61,7 +61,7 @@ def main():
             directory_name = format_dir.name
             if directory_name not in formats_to_capture:
                 continue
-            format_name = "vortex-file-compressed" if directory_name == experimental_vortex_dir else directory_name
+            format_name = "vortex-file-compressed" if directory_name == bloom_vortex_dir else directory_name
 
             # Extract scale factor from path (e.g., "1.0" for tpch/1.0/vortex-file-compressed)
             # Default to "1.0" if no intermediate directory (e.g., clickbench)

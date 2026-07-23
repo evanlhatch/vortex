@@ -1,9 +1,4 @@
-//! Experimental skipping-index interface and bloom-filter implementation.
-//!
-//! This module is intentionally a spike. Its APIs are not stable and its bloom format is not a
-//! compatibility commitment.
-
-mod ngram;
+//! Skipping-index interface and Bloom-filter implementation.
 
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
@@ -15,8 +10,6 @@ use std::num::NonZeroU8;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-pub use ngram::NGramBloomOptions;
-pub use ngram::NGramBloomSkipIndex;
 use vortex_array::ArrayRef;
 use vortex_array::Columnar;
 use vortex_array::ExecutionCtx;
@@ -65,7 +58,7 @@ use super::writer::default_zoned_aggregate_fns;
 /// needed to consult it.
 ///
 /// The writer helper [`ZonedLayoutOptions::with_skip_index`] is the explicit per-column declaration
-/// seam. Readers call [`SkipIndex::register`] on their fresh session before opening the file.
+/// seam. Readers call [`SkipIndex::register`] on their session before opening the file.
 pub trait SkipIndex: Debug + Send + Sync + 'static {
     /// The aggregate state to persist for `input_dtype`, or `None` when unsupported.
     fn aggregate_fn(&self, input_dtype: &DType) -> Option<AggregateFnRef>;
@@ -77,8 +70,8 @@ pub trait SkipIndex: Debug + Send + Sync + 'static {
 impl ZonedLayoutOptions {
     /// Add `index` to this zoned writer while retaining the default min/max-style aggregates.
     ///
-    /// A `ZonedStrategy` configured with these options can be installed for one field with
-    /// `TableStrategy::with_field_writer`, which is the spike's write-time "index column X" API.
+    /// `WriteStrategyBuilder::with_field_zoned_options` can install the configured options for one
+    /// field while retaining the default data layout pipeline.
     pub fn with_skip_index<I: SkipIndex + ?Sized>(
         mut self,
         index: &I,
@@ -142,7 +135,7 @@ impl Display for BloomOptions {
     }
 }
 
-/// Experimental bloom skipping index for `i64` equality predicates.
+/// Bloom skipping index for `i64` equality predicates.
 #[derive(Clone, Debug, Default)]
 pub struct BloomSkipIndex {
     options: BloomOptions,
@@ -178,13 +171,12 @@ impl SkipIndex for BloomSkipIndex {
 
 /// Aggregate that stores one fixed-size bloom bitset as a `Binary` scalar for every zone.
 #[derive(Clone, Debug)]
-pub struct BloomFilter;
+struct BloomFilter;
 
 /// In-memory bloom accumulator. Only the bitset is persisted.
-pub struct BloomPartial {
-    pub(super) bits: Vec<u8>,
-    pub(super) hashes: u8,
-    pub(super) gram_size: Option<u8>,
+struct BloomPartial {
+    bits: Vec<u8>,
+    hashes: u8,
 }
 
 impl AggregateFnVTable for BloomFilter {
@@ -192,7 +184,7 @@ impl AggregateFnVTable for BloomFilter {
     type Partial = BloomPartial;
 
     fn id(&self) -> AggregateFnId {
-        static ID: CachedId = CachedId::new("vortex.experimental.bloom_filter.i64.v1");
+        static ID: CachedId = CachedId::new("vortex.bloom_filter.i64.v1");
         *ID
     }
 
@@ -235,7 +227,6 @@ impl AggregateFnVTable for BloomFilter {
         Ok(BloomPartial {
             bits: vec![0; options.bytes.get()],
             hashes: options.hashes.get(),
-            gram_size: None,
         })
     }
 
@@ -309,13 +300,13 @@ impl AggregateFnVTable for BloomFilter {
 
 /// Probe scalar function: test one `i64` literal against each binary bloom state.
 #[derive(Clone, Debug)]
-pub struct BloomContains;
+struct BloomContains;
 
 impl ScalarFnVTable for BloomContains {
     type Options = BloomOptions;
 
     fn id(&self) -> ScalarFnId {
-        static ID: CachedId = CachedId::new("vortex.experimental.bloom_contains.i64.v1");
+        static ID: CachedId = CachedId::new("vortex.bloom_contains.i64.v1");
         *ID
     }
 
@@ -407,7 +398,7 @@ impl ScalarFnVTable for BloomContains {
                 zones = valid_zones,
                 definitely_absent_zones = valid_zones - possible_zones,
                 average_fill_ratio = set_bits as f64 / total_bits,
-                "experimental skip-index probe"
+                "skip-index probe"
             );
         }
         Ok(BoolArray::new(BitBuffer::from_iter(possible), validity).into_array())
@@ -424,7 +415,7 @@ impl ScalarFnVTable for BloomContains {
 
 /// Equality rewrite that turns a bloom miss into a zone falsifier.
 #[derive(Clone, Debug)]
-pub struct BloomEqRewrite {
+struct BloomEqRewrite {
     options: BloomOptions,
 }
 
@@ -480,10 +471,6 @@ fn bloom_insert(bits: &mut [u8], value: i64, hashes: u8) {
     );
 }
 
-pub(super) fn bloom_insert_bytes(bits: &mut [u8], value: &[u8], hashes: u8) {
-    bloom_insert_hash(bits, stable_hash_bytes(value), hashes);
-}
-
 fn bloom_insert_hash(bits: &mut [u8], hash: u64, hashes: u8) {
     for (byte, bit) in bloom_positions(hash, bits.len(), hashes) {
         bits[byte] |= 1 << bit;
@@ -496,10 +483,6 @@ fn bloom_contains(bits: &[u8], value: i64, hashes: u8) -> bool {
         splitmix64(value as u64 ^ 0x243f_6a88_85a3_08d3),
         hashes,
     )
-}
-
-pub(super) fn bloom_contains_bytes(bits: &[u8], value: &[u8], hashes: u8) -> bool {
-    bloom_contains_hash(bits, stable_hash_bytes(value), hashes)
 }
 
 fn bloom_contains_hash(bits: &[u8], hash: u64, hashes: u8) -> bool {
@@ -521,13 +504,6 @@ fn bloom_positions(hash: u64, bytes: usize, hashes: u8) -> impl Iterator<Item = 
     })
 }
 
-fn stable_hash_bytes(value: &[u8]) -> u64 {
-    let hash = value.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-    });
-    splitmix64(hash ^ 0x243f_6a88_85a3_08d3)
-}
-
 fn splitmix64(mut value: u64) -> u64 {
     value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
     value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -535,8 +511,8 @@ fn splitmix64(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
-pub(super) fn diagnostics_enabled() -> bool {
-    std::env::var("VORTEX_EXPERIMENTAL_SKIP_INDEX_DIAGNOSTICS").is_ok_and(|value| value == "1")
+fn diagnostics_enabled() -> bool {
+    std::env::var("VORTEX_SKIP_INDEX_DIAGNOSTICS").is_ok_and(|value| value == "1")
 }
 
 #[cfg(test)]

@@ -50,39 +50,13 @@ jobs:
       mode: "pr"
       pr_number: ${{ inputs.pr_number }}
       benchmark_profile: "full"
-      experimental_skip_index: true
+      bloom_skip_index: true
       benchmark_matrix: |
         [
           {
             "id": "clickbench-nvme",
             "subcommand": "clickbench",
             "name": "Clickbench on NVME",
-            "data_formats": ["parquet", "vortex"],
-            "pr_targets": [{"engine": "datafusion", "format": "parquet"}, {"engine": "datafusion", "format": "vortex"}],
-            "develop_targets": [{"engine": "datafusion", "format": "parquet"}, {"engine": "datafusion", "format": "vortex"}]
-          },
-          {
-            "id": "clickbench-sorted-nvme",
-            "subcommand": "clickbench-sorted",
-            "name": "Clickbench Sorted on NVME",
-            "data_formats": ["parquet", "vortex"],
-            "pr_targets": [{"engine": "datafusion", "format": "parquet"}, {"engine": "datafusion", "format": "vortex"}],
-            "develop_targets": [{"engine": "datafusion", "format": "parquet"}, {"engine": "datafusion", "format": "vortex"}]
-          },
-          {
-            "id": "fineweb",
-            "subcommand": "fineweb",
-            "name": "FineWeb NVMe",
-            "data_formats": ["parquet", "vortex"],
-            "pr_targets": [{"engine": "datafusion", "format": "parquet"}, {"engine": "datafusion", "format": "vortex"}],
-            "develop_targets": [{"engine": "datafusion", "format": "parquet"}, {"engine": "datafusion", "format": "vortex"}]
-          },
-          {
-            "id": "fineweb-s3",
-            "subcommand": "fineweb",
-            "name": "FineWeb S3",
-            "local_dir": "vortex-bench/data/fineweb",
-            "remote_storage": "s3://vortex-ci-benchmark-datasets/${{github.ref_name}}/${{github.run_id}}/fineweb/",
             "data_formats": ["parquet", "vortex"],
             "pr_targets": [{"engine": "datafusion", "format": "parquet"}, {"engine": "datafusion", "format": "vortex"}],
             "develop_targets": [{"engine": "datafusion", "format": "parquet"}, {"engine": "datafusion", "format": "vortex"}]

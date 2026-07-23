@@ -14,7 +14,7 @@ on:
         required: false
         type: string
         default: ""
-      experimental_skip_index:
+      bloom_skip_index:
         required: false
         type: boolean
         default: false
@@ -539,12 +539,9 @@ jobs:
     timeout-minutes: 120
     env:
       VORTEX_EXPERIMENTAL_PATCHED_ARRAY: "1"
-      VORTEX_EXPERIMENTAL_SKIP_INDEX: ${{ inputs.experimental_skip_index && '1' || '' }}
-      VORTEX_EXPERIMENTAL_SKIP_INDEX_DIAGNOSTICS: ${{ inputs.experimental_skip_index && '1' || '' }}
-      VORTEX_EXPERIMENTAL_SKIP_INDEX_DIR: ${{ inputs.experimental_skip_index && 'vortex-file-skipping' || '' }}
-      VORTEX_EXPERIMENTAL_NGRAM_BYTES: "16384"
-      VORTEX_EXPERIMENTAL_NGRAM_HASHES: "5"
-      VORTEX_EXPERIMENTAL_NGRAM_ZONE_LEN: ${{ startsWith(matrix.id, 'fineweb') && '1024' || '8192' }}
+      VORTEX_BLOOM_SKIP_INDEX: ${{ inputs.bloom_skip_index && '1' || '' }}
+      VORTEX_SKIP_INDEX_DIAGNOSTICS: ${{ inputs.bloom_skip_index && '1' || '' }}
+      VORTEX_BLOOM_SKIP_INDEX_DIR: ${{ inputs.bloom_skip_index && 'vortex-file-bloom' || '' }}
       FLAT_LAYOUT_INLINE_ARRAY_NODE: "1"
       # Makes python output nicer
       COLUMNS: 120

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-//! End-to-end correctness evidence for the experimental zoned bloom skipping index.
+//! End-to-end correctness evidence for the zoned Bloom skipping index.
 
 use std::num::NonZeroU8;
 use std::num::NonZeroUsize;
@@ -21,7 +21,6 @@ use vortex_array::VortexSessionExecute;
 use vortex_array::arrays::ChunkedArray;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::arrays::StructArray;
-use vortex_array::arrays::VarBinViewArray;
 use vortex_array::assert_arrays_eq;
 use vortex_array::dtype::DType;
 use vortex_array::dtype::Nullability;
@@ -32,9 +31,6 @@ use vortex_array::expr::get_item;
 use vortex_array::expr::lit;
 use vortex_array::expr::root;
 use vortex_array::field_path;
-use vortex_array::scalar_fn::ScalarFnVTableExt;
-use vortex_array::scalar_fn::fns::like::Like;
-use vortex_array::scalar_fn::fns::like::LikeOptions;
 use vortex_array::stream::ArrayStreamExt;
 use vortex_error::VortexResult;
 use vortex_file::OpenOptionsSessionExt;
@@ -42,15 +38,10 @@ use vortex_file::WriteOptionsSessionExt;
 use vortex_file::WriteStrategyBuilder;
 use vortex_io::session::RuntimeSession;
 use vortex_layout::LayoutStrategy;
-use vortex_layout::layouts::chunked::writer::ChunkedLayoutStrategy;
-use vortex_layout::layouts::flat::writer::FlatLayoutStrategy;
-use vortex_layout::layouts::table::TableStrategy;
-use vortex_layout::layouts::zoned::experimental::BloomOptions;
-use vortex_layout::layouts::zoned::experimental::BloomSkipIndex;
-use vortex_layout::layouts::zoned::experimental::NGramBloomSkipIndex;
-use vortex_layout::layouts::zoned::experimental::SkipIndex;
+use vortex_layout::layouts::zoned::skip_index::BloomOptions;
+use vortex_layout::layouts::zoned::skip_index::BloomSkipIndex;
+use vortex_layout::layouts::zoned::skip_index::SkipIndex;
 use vortex_layout::layouts::zoned::writer::ZonedLayoutOptions;
-use vortex_layout::layouts::zoned::writer::ZonedStrategy;
 use vortex_layout::segments::SegmentFuture;
 use vortex_layout::segments::SegmentId;
 use vortex_layout::segments::SegmentSource;
@@ -143,13 +134,6 @@ fn filter(value: i64) -> Expression {
     eq(get_item("id", root()), lit(value))
 }
 
-fn like_filter(pattern: &str) -> Expression {
-    Like.new_expr(
-        LikeOptions::default(),
-        [get_item("text", root()), lit(pattern)],
-    )
-}
-
 fn strategy(
     session: &VortexSession,
     index: Option<&dyn SkipIndex>,
@@ -162,28 +146,14 @@ fn strategy(
     if let Some(index) = index {
         options = options.with_skip_index(index, &PType::I64.into(), session)?;
     }
-    let zoned = ZonedStrategy::new(
-        ChunkedLayoutStrategy::new(FlatLayoutStrategy::default()),
-        FlatLayoutStrategy::default(),
-        options,
-    );
-    let flat: Arc<dyn LayoutStrategy> = Arc::new(FlatLayoutStrategy::default());
-    Ok(Arc::new(
-        TableStrategy::new(Arc::clone(&flat), flat)
-            .with_field_writer(field_path!(id), Arc::new(zoned)),
-    ))
+    Ok(WriteStrategyBuilder::default()
+        .with_field_zoned_options(field_path!(id), options)
+        .build())
 }
 
 async fn scan(file: &vortex_file::VortexFile, value: i64) -> VortexResult<ArrayRef> {
-    scan_expression(file, filter(value)).await
-}
-
-async fn scan_expression(
-    file: &vortex_file::VortexFile,
-    filter: Expression,
-) -> VortexResult<ArrayRef> {
     file.scan()?
-        .with_filter(filter)
+        .with_filter(filter(value))
         .into_array_stream()?
         .read_all()
         .await
@@ -199,53 +169,6 @@ async fn write_file(
     session
         .write_options()
         .with_strategy(strategy(session, index, zone_len)?)
-        .write(&mut bytes, input.to_array_stream())
-        .await?;
-    Ok(bytes)
-}
-
-fn ngram_data() -> ArrayRef {
-    let chunks = [
-        ["alpha google result", "alpha", "search", "result"],
-        ["beta page", "beta", "another", "page"],
-        ["vortex storage", "columnar", "format", "rust"],
-        ["omega", "ending", "document", "text"],
-    ]
-    .into_iter()
-    .map(|values| {
-        StructArray::from_fields(&[("text", VarBinViewArray::from_iter_str(values).into_array())])
-            .expect("valid string test struct")
-            .into_array()
-    })
-    .collect::<Vec<_>>();
-    ChunkedArray::try_new(
-        chunks,
-        DType::struct_(
-            [("text", DType::Utf8(Nullability::NonNullable))],
-            Nullability::NonNullable,
-        ),
-    )
-    .expect("valid chunked string data")
-    .into_array()
-}
-
-async fn write_ngram_file(
-    session: &VortexSession,
-    input: &ArrayRef,
-    index: &NGramBloomSkipIndex,
-) -> VortexResult<Vec<u8>> {
-    let options = ZonedLayoutOptions {
-        block_size: NonZeroUsize::new(4).expect("zone length is non-zero"),
-        ..Default::default()
-    }
-    .with_skip_index(index, &DType::Utf8(Nullability::NonNullable), session)?;
-    let strategy = WriteStrategyBuilder::default()
-        .with_field_zoned_options(field_path!(text), options)
-        .build();
-    let mut bytes = Vec::new();
-    session
-        .write_options()
-        .with_strategy(strategy)
         .write(&mut bytes, input.to_array_stream())
         .await?;
     Ok(bytes)
@@ -327,64 +250,6 @@ async fn bloom_roundtrip_prunes_and_unknown_reader_matches_full_scan() -> Vortex
     Ok(())
 }
 
-#[tokio::test]
-async fn ngram_roundtrip_prunes_substring_like_and_matches_full_scan() -> VortexResult<()> {
-    let index = NGramBloomSkipIndex::default();
-    let write_session = session(Some(&index));
-    let input = ngram_data();
-    let bytes = write_ngram_file(&write_session, &input, &index).await?;
-
-    let read_session = session(Some(&index));
-    let file = read_session.open_options().open_buffer(bytes.clone())?;
-    let reader = file.layout_reader()?;
-    let row_count = file.row_count();
-
-    let hit_mask = reader
-        .pruning_evaluation(
-            &(0..row_count),
-            &like_filter("%google%"),
-            Mask::new_true(usize::try_from(row_count)?),
-        )?
-        .await?;
-    assert!(hit_mask.iter().take(4).all(|keep| keep));
-    assert!(hit_mask.iter().skip(4).all(|keep| !keep));
-
-    let miss_mask = reader
-        .pruning_evaluation(
-            &(0..row_count),
-            &like_filter("%missing-needle%"),
-            Mask::new_true(usize::try_from(row_count)?),
-        )?
-        .await?;
-    assert!(
-        miss_mask.all_false(),
-        "an absent substring should prune every zone"
-    );
-
-    let full_scan_session = session(None);
-    full_scan_session.allow_unknown();
-    let full_scan_file = full_scan_session.open_options().open_buffer(bytes)?;
-
-    let indexed_hit = scan_expression(&file, like_filter("%google%")).await?;
-    let full_scan_hit = scan_expression(&full_scan_file, like_filter("%google%")).await?;
-    assert_arrays_eq!(
-        indexed_hit,
-        full_scan_hit,
-        &mut read_session.create_execution_ctx()
-    );
-    assert_eq!(indexed_hit.len(), 1);
-
-    let indexed_miss = scan_expression(&file, like_filter("%missing-needle%")).await?;
-    let full_scan_miss = scan_expression(&full_scan_file, like_filter("%missing-needle%")).await?;
-    assert_arrays_eq!(
-        indexed_miss,
-        full_scan_miss,
-        &mut read_session.create_execution_ctx()
-    );
-    assert_eq!(indexed_miss.len(), 0);
-    Ok(())
-}
-
 #[derive(Default)]
 struct ReadCounts {
     requests: AtomicU64,
@@ -460,12 +325,12 @@ fn median(runs: &mut [BenchRun]) -> &BenchRun {
     &runs[runs.len() / 2]
 }
 
-/// Focused spike benchmark. Run with:
+/// Focused Bloom benchmark. Run with:
 ///
-/// `cargo test --release -p vortex-file --test experimental_bloom bloom_point_lookup_benchmark
+/// `cargo test --release -p vortex-file --test bloom_skip_index bloom_point_lookup_benchmark
 /// -- --ignored --nocapture`
 #[tokio::test]
-#[ignore = "release-only experimental benchmark"]
+#[ignore = "release-only benchmark"]
 async fn bloom_point_lookup_benchmark() -> VortexResult<()> {
     const BENCH_ZONE_LEN: usize = 8192;
     const BENCH_NZONES: usize = 256;

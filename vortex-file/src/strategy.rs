@@ -221,8 +221,8 @@ impl WriteStrategyBuilder {
     /// Override only the zoned-statistics options for a field while retaining the default
     /// repartitioning, dictionary, compression, buffering, and flat-layout pipeline.
     ///
-    /// This is an experimental seam for attaching custom per-zone aggregates without changing the
-    /// physical data strategy used for controlled comparisons.
+    /// This can attach custom per-zone aggregates without changing the physical data strategy for
+    /// the field.
     pub fn with_field_zoned_options(
         mut self,
         field: impl Into<FieldPath>,

@@ -51,7 +51,6 @@ use vortex::layout::LayoutStrategy;
 use vortex::layout::layouts::chunked::writer::ChunkedLayoutStrategy;
 use vortex::layout::layouts::compressed::CompressingStrategy;
 use vortex::layout::layouts::flat::writer::FlatLayoutStrategy;
-use vortex::layout::layouts::zoned::experimental::SkipIndex;
 use vortex::layout::layouts::zoned::writer::ZonedLayoutOptions;
 use vortex::session::VortexSession;
 use vortex::utils::aliases::hash_set::HashSet;
@@ -67,10 +66,8 @@ use wkb::writer::write_geometry;
 use crate::CompactionStrategy;
 use crate::Format;
 use crate::SESSION;
-use crate::experimental_bloom_index;
-use crate::experimental_ngram_index;
-use crate::experimental_ngram_zone_len;
-use crate::experimental_skip_indexes_enabled;
+use crate::bloom_skip_index;
+use crate::bloom_skip_index_enabled;
 use crate::format_data_dir;
 use crate::utils::file::idempotent_async;
 
@@ -201,8 +198,7 @@ fn write_options_for(
         _ => Vec::new(),
     };
     if binary_fields.is_empty()
-        && (!experimental_skip_indexes_enabled()
-            || matches!(compaction, CompactionStrategy::Compact))
+        && (!bloom_skip_index_enabled() || matches!(compaction, CompactionStrategy::Compact))
     {
         return Ok(compaction.apply_options(SESSION.write_options()));
     }
@@ -216,28 +212,22 @@ fn write_options_for(
         builder = builder.with_field_writer(FieldPath::from_name(name), no_dict_layout());
     }
 
-    if experimental_skip_indexes_enabled()
+    if bloom_skip_index_enabled()
         && matches!(compaction, CompactionStrategy::Default)
         && let DType::Struct(fields, _) = dtype
     {
-        let exact = experimental_bloom_index();
-        let ngram = experimental_ngram_index();
+        let index = bloom_skip_index();
         for (name, field_dtype) in fields.names().iter().zip(fields.fields()) {
-            let (index, block_size): (&dyn SkipIndex, _) = match (name.as_ref(), &field_dtype) {
-                ("UserID", DType::Primitive(PType::I64, _)) => (
-                    &exact,
-                    std::num::NonZeroUsize::new(8192).unwrap_or(std::num::NonZeroUsize::MIN),
-                ),
-                ("URL" | "Title" | "url" | "text" | "file_path", DType::Utf8(_)) => {
-                    (&ngram, experimental_ngram_zone_len())
-                }
-                _ => continue,
-            };
+            if name.as_ref() != "UserID" || !matches!(field_dtype, DType::Primitive(PType::I64, _))
+            {
+                continue;
+            }
             let options = ZonedLayoutOptions {
-                block_size,
+                block_size: std::num::NonZeroUsize::new(8192)
+                    .unwrap_or(std::num::NonZeroUsize::MIN),
                 ..Default::default()
             }
-            .with_skip_index(index, &field_dtype, &SESSION)?;
+            .with_skip_index(&index, &field_dtype, &SESSION)?;
             builder = builder.with_field_zoned_options(FieldPath::from_name(name.clone()), options);
         }
     }
