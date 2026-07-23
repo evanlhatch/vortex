@@ -59,7 +59,7 @@ TEST_CASE("Bool view", "[array]") {
     constexpr size_t OFFSET = 6;
     vx_bool_view view {.ptr = buffer.data(), .elements = ELEMENTS, .bit_offset = OFFSET};
 
-    REQUIRE(vx_bool_view_len(view) == 2);
+    REQUIRE(vx_bool_view_words(view) == 2);
 
     for (size_t i = 0; i < view.elements; ++i) {
         REQUIRE(vx_bool_view_nth(view, i) == 1);

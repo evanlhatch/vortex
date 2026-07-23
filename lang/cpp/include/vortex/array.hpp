@@ -32,7 +32,7 @@ class StringView;
 class BytesView;
 
 /**
- * Readonly view over bitpacked booleans.
+ * Non-owning view over bitpacked booleans.
  *
  * Bits are laid out LSB-first.
  * "bit_offset" is in [0; 8) and lets a view start at a non-byte-aligned bit.
@@ -41,30 +41,33 @@ class BytesView;
  * "view" holds 6 boolean elements starting at bit 2, first 5 set to "true",
  * last is "false".
  *
+ * // [6][5][4][3][2][1][0][offset bit][offset bit]
  * uint8_t word = 0b01111100;
  * BoolView view = {&word, 6, 2};
  */
 struct BoolView {
-    std::span<const uint8_t> bytes;
+    const uint8_t* ptr = nullptr;
+
+    /*
+     * Number of elements (bits) in the view. This is not the number of uint8_t
+     * words in "ptr", use words() for that.
+     */
+    size_t elements = 0;
+
     /*
      * Bit offset of first element in "bytes".
      * Example: if bit_offset is 2, first bit is at bytes[0] & (1 << 2).
      */
     size_t bit_offset = 0;
 
-    // Get bit at "index". Index is in [0; elements()).
+    // Get bit at "index". Index is in [0; elements).
     inline bool operator[](size_t index) const {
-        return (bytes.data()[(index + bit_offset) / 8] & (1 << ((index + bit_offset) % 8)));
+        return vx_bool_view_nth(*this, index);
     }
 
     // Number of uint8_t words storing elements.
     inline size_t words() const {
-        return bytes.size();
-    }
-
-    // Number of set elements/bits
-    inline size_t elements() const {
-        return words() * 8 - bit_offset;
+        return vx_bool_view_words(*this);
     }
 };
 
