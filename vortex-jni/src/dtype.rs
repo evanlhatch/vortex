@@ -5,18 +5,23 @@
 //! [`FFI_ArrowSchema`]. Java receives DType information exclusively as Arrow schema.
 
 use std::ptr;
+use std::sync::LazyLock;
 
 use arrow_array::ffi::FFI_ArrowSchema;
 use arrow_schema::Schema;
 use vortex::dtype::DType;
 use vortex::error::VortexResult;
-use vortex_arrow::ToArrowType;
+use vortex_arrow::ArrowSession;
+
+/// The JNI schema-export entry points receive no session pointer, so schema conversion uses a
+/// default [`ArrowSession`] (builtin plugins only).
+static ARROW_SESSION: LazyLock<ArrowSession> = LazyLock::new(ArrowSession::default);
 
 /// Export a Vortex [`DType`] to the Arrow C Data Interface struct at `schema_addr`. String and
 /// binary columns are exported as their native view types (Utf8View/BinaryView); consumers are
 /// expected to handle them.
 pub(crate) fn export_dtype_to_arrow(dtype: &DType, schema_addr: i64) -> VortexResult<()> {
-    let arrow_schema = dtype.to_arrow_schema()?;
+    let arrow_schema = ARROW_SESSION.to_arrow_schema(dtype)?;
     let ffi_schema = FFI_ArrowSchema::try_from(&arrow_schema)?;
     unsafe {
         ptr::write(schema_addr as *mut FFI_ArrowSchema, ffi_schema);

@@ -27,7 +27,7 @@ use vortex::io::runtime::BlockingRuntime;
 use vortex::layout::scan::scan_builder::ScanBuilder;
 use vortex::layout::scan::split_by::SplitBy;
 use vortex::layout::segments::MokaSegmentCache;
-use vortex_arrow::ToArrowType;
+use vortex_arrow::ArrowSessionExt;
 
 use crate::RUNTIME;
 use crate::arrays::PyArrayRef;
@@ -177,7 +177,7 @@ impl PyVortexFile {
                 builder = builder.with_split_by(SplitBy::RowCount(batch_size));
             }
 
-            let schema = Arc::new(builder.dtype()?.to_arrow_schema()?);
+            let schema = Arc::new(session().arrow().to_arrow_schema(&builder.dtype()?)?);
             builder.into_record_batch_reader(schema, &*RUNTIME)
         })?;
 

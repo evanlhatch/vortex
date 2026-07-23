@@ -43,7 +43,6 @@ use vortex::scan::PartitionStream;
 use vortex::scan::ScanRequest;
 use vortex::scan::selection::Selection;
 use vortex_arrow::ArrowSessionExt;
-use vortex_arrow::ToArrowType;
 
 use crate::POOL;
 use crate::RUNTIME;
@@ -343,10 +342,10 @@ pub extern "system" fn Java_dev_vortex_jni_NativePartition_scanArrow(
         let array_stream = partition.execute()?;
         let dtype = array_stream.dtype().clone();
 
-        let schema = Arc::new(dtype.to_arrow_schema()?);
-        let target = Arc::new(Field::new_struct("", schema.fields().clone(), false));
-
         let session = unsafe { session_ref(session_ptr) };
+
+        let schema = Arc::new(session.arrow().to_arrow_schema(&dtype)?);
+        let target = Arc::new(Field::new_struct("", schema.fields().clone(), false));
 
         let iter = RUNTIME
             .block_on_stream_thread_safe(|handle| {
