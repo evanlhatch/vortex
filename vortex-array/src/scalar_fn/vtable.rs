@@ -192,25 +192,30 @@ pub trait ScalarFnVTable: 'static + Sized + Clone + Send + Sync {
         Ok(None)
     }
 
-    /// Returns whether this expression itself is null-sensitive. Conservatively default to *true*.
+    /// Returns whether this expression itself is strict.
     ///
-    /// An expression is null-sensitive if it directly operates on null values,
-    /// such as `is_null`. Most expressions are not null-sensitive.
+    /// Strict has the same value-level meaning as PostgreSQL `STRICT`: if any input value at row
+    /// `i` is null, the output value at row `i` is null.
     ///
-    /// The property we are interested in is if the expression (e) distributes over `mask`.
-    /// Define a `mask(a, m)` expression that applies the boolean array `m` to the validity of the
-    /// array `a`.
+    /// Equivalently, define `mask(a, m)[i]` as `a[i]` when `m[i]` is true and null otherwise.
+    /// A function `f` is strict iff, for every argument position `j`,
+    /// `f(a1, .., mask(aj, m), .., ak) == mask(f(a1, .., ak), m)`. Optimizations rely on this
+    /// per-argument form when pushing a function through dictionary codes while leaving sibling
+    /// constants unmasked. It is stronger than commuting with masking all arguments at once:
+    /// Kleene AND and OR satisfy the all-arguments law but are not strict because, for example,
+    /// `false AND null = false`.
     ///
-    /// A unary expression `e` is not null-sensitive iff forall arrays `a` and masks `m`,
-    /// `e(mask(a, m)) == mask(e(a), m)`.
+    /// Returning `true` also requires [`ScalarFnVTable::return_dtype`] to propagate nullability:
+    /// if any input dtype is nullable, the output dtype must be nullable. For example, `cast` is
+    /// value-strict but can pin a non-nullable output dtype through its options, so it must return
+    /// `false`.
     ///
-    /// This can be extended to an n-ary expression.
+    /// Nullary functions are vacuously strict because they have no input values.
+    ///
+    /// Every implementation must declare its strictness explicitly.
     ///
     /// This method only checks the expression itself, not its children.
-    fn is_null_sensitive(&self, options: &Self::Options) -> bool {
-        _ = options;
-        true
-    }
+    fn is_strict(&self, options: &Self::Options) -> bool;
 
     /// Returns whether this expression is semantically fallible. Conservatively defaults to
     /// `true`.
