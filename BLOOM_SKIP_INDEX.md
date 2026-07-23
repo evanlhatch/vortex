@@ -72,13 +72,15 @@ retains the normal dictionary, compressor, coalescing, and flat-layout stages an
 candidate to a separate `vortex-file-bloom` directory. The candidate job times unchanged
 DataFusion/Parquet alongside indexed DataFusion/Vortex so runner-wide movement is visible.
 
-The earlier mixed-index run already isolated the point-lookup behavior: ClickBench q19 improved
-from 29.23 ms to 21.42 ms, approximately **1.33x faster after its Parquet control**. One scan proved
-12,294 of 12,299 zones absent and kept only five. The full 43-query suite stayed neutral because the
-other queries could not use the equality index.
+The [Bloom-only controlled run](https://github.com/vortex-data/vortex/actions/runs/30016883432)
+improved ClickBench q19 from 26.22 ms to 18.85 ms: **1.39x faster raw** and **1.43x faster after its
+Parquet control**. One scan proved 12,294 of 12,299 zones absent and retained five. Across all 43
+queries, Vortex's geomean was 0.914x while the Parquet control was 0.930x, an attributed 1.8%
+improvement that the benchmark classified as no clear signal because the environment was too
+noisy. The equality Bloom only applies to q19, so a suite-wide improvement is not expected.
 
-A Bloom-only controlled rerun is required to replace the mixed-index file-size number and confirm
-the cleaned implementation's wall time.
+The indexed Vortex files grew from 11.04 GB to 11.13 GB in total, or 0.8%. Each roughly
+one-million-row shard added approximately 986 KB.
 
 ## Interface recommendation
 
