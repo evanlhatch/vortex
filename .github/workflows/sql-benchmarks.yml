@@ -604,6 +604,15 @@ jobs:
           fi
           cargo build "${packages[@]}" --profile release_debug --features unstable_encodings
 
+      - name: Generate data
+        shell: bash
+        env:
+          RUST_BACKTRACE: full
+        run: |
+          uv run --project bench-orchestrator vx-bench prepare-data "${{ matrix.subcommand }}" \
+            --formats-json '${{ toJSON(matrix.data_formats) }}' \
+            ${{ matrix.scale_factor && format('--opt scale-factor={0}', matrix.scale_factor) || '' }}
+
       - name: Place cold benchmark data on ephemeral storage
         if: inputs.mode == 'pr' && matrix.cold_io_query != null
         shell: bash
@@ -615,21 +624,12 @@ jobs:
             exit 0
           fi
 
+          source_dir="vortex-bench/data/${{ matrix.subcommand }}"
           data_root="/mnt/ephemeral/vortex-bench-data-${{ github.run_id }}"
-          sudo install -d -o "$(id -u)" -g "$(id -g)" \
-            "${data_root}/${{ matrix.subcommand }}"
-          mkdir -p vortex-bench/data
-          ln -s "${data_root}/${{ matrix.subcommand }}" \
-            "vortex-bench/data/${{ matrix.subcommand }}"
-
-      - name: Generate data
-        shell: bash
-        env:
-          RUST_BACKTRACE: full
-        run: |
-          uv run --project bench-orchestrator vx-bench prepare-data "${{ matrix.subcommand }}" \
-            --formats-json '${{ toJSON(matrix.data_formats) }}' \
-            ${{ matrix.scale_factor && format('--opt scale-factor={0}', matrix.scale_factor) || '' }}
+          data_dir="${data_root}/${{ matrix.subcommand }}"
+          sudo install -d -o "$(id -u)" -g "$(id -g)" "$data_root"
+          mv "$source_dir" "$data_dir"
+          ln -s "$data_dir" "$source_dir"
 
       - name: Setup AWS CLI
         if: inputs.mode != 'pr' || github.event.pull_request.head.repo.fork == false
