@@ -309,6 +309,9 @@ impl PooledPinnedBuffer {
             .unwrap_or_else(|e| vortex_panic!("failed to access pinned host buffer: {e}"))
     }
 
+    /// Shortens the logical length without reallocating the pinned buffer.
+    ///
+    /// This is an O(1) metadata update; the allocation capacity is unchanged.
     #[cfg(target_os = "linux")]
     pub(crate) fn truncate(&mut self, len: usize) {
         let inner = self
