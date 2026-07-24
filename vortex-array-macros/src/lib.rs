@@ -19,7 +19,8 @@ use syn::spanned::Spanned;
 /// Generate slot index constants, a borrowed view struct, and a typed ext trait
 /// from a slot struct definition.
 ///
-/// Fields must be `ArrayRef` (required slot) or `Option<ArrayRef>` (optional slot).
+/// Fields must be `ArrayRef` (required slot), `Option<ArrayRef>` (optional slot), or —
+/// for the final field only — `Vec<ArrayRef>` (variadic tail of required slots).
 /// Field declaration order determines slot indices.
 ///
 /// # Example
@@ -94,6 +95,61 @@ use syn::spanned::Spanned;
 ///
 /// The underlying storage is always `ArraySlots` — the field type only
 /// controls whether the macro inserts a `.vortex_expect()` unwrap or not.
+///
+/// # Variadic tail slots
+///
+/// The final field may be `Vec<ArrayRef>`, declaring that every slot from that
+/// position onward belongs to a homogeneous, variable-length run of required slots.
+/// This supports encodings like `Chunked` (`[chunk_offsets, chunks...]`),
+/// `Struct` (`[validity?, fields...]`), and `Union` (`[type_ids, children...]`).
+///
+/// ```ignore
+/// #[array_slots(Chunked)]
+/// pub struct ChunkedSlots {
+///     pub chunk_offsets: ArrayRef,
+///     pub chunks: Vec<ArrayRef>,
+/// }
+/// ```
+///
+/// For a struct with a variadic tail, the macro generates a different set of
+/// constants — slot count is no longer a compile-time constant:
+///
+/// ```ignore
+/// impl ChunkedSlots {
+///     pub const CHUNK_OFFSETS: usize = 0;
+///     /// Offset at which the `chunks` slots begin.
+///     pub const CHUNKS_OFFSET: usize = 1;
+///     /// Number of fixed (non-variadic) slots.
+///     pub const FIXED_COUNT: usize = 1;
+///     /// Names of the fixed slots in storage order.
+///     pub const FIXED_NAMES: [&'static str; 1] = ["chunk_offsets"];
+///
+///     /// Name of the slot at `idx`, e.g. "chunk_offsets" or "chunks[3]".
+///     pub fn slot_name(idx: usize) -> String { ... }
+///
+///     pub fn from_slots(slots: ArraySlots) -> Self { ... }
+///     pub fn into_slots(self) -> ArraySlots { ... }
+/// }
+/// ```
+///
+/// The view field and ext trait accessor for the tail are a [`SlotSlice`], a
+/// borrowed run of required slots supporting `len()`, `get()`, `iter()`, and
+/// indexing:
+///
+/// ```ignore
+/// pub struct ChunkedSlotsView<'a> {
+///     pub chunk_offsets: &'a ArrayRef,
+///     pub chunks: SlotSlice<'a>,
+/// }
+///
+/// pub trait ChunkedArraySlotsExt: TypedArrayRef<Chunked> {
+///     fn chunk_offsets(&self) -> &ArrayRef { ... }
+///     fn chunks(&self) -> SlotSlice<'_> { ... }
+///     fn slots_view(&self) -> ChunkedSlotsView<'_> { ... }
+/// }
+/// ```
+///
+/// [`SlotSlice`]: ::vortex_array::SlotSlice
 #[proc_macro_attribute]
 pub fn array_slots(attr: TokenStream, item: TokenStream) -> TokenStream {
     let encoding = parse_macro_input!(attr as Path);
@@ -143,15 +199,32 @@ fn expand_array_slots(
         .map(|(index, field)| SlotField::new(field, index, struct_ident))
         .collect::<syn::Result<Vec<_>>>()?;
 
-    let idx_consts = field_specs.iter().map(SlotField::idx_const);
+    // A variadic tail is only permitted as the final field, at most once.
+    for spec in field_specs.iter().rev().skip(1) {
+        if matches!(spec.slot_type, SlotFieldType::VariadicTail) {
+            return Err(syn::Error::new(
+                spec.field_ident.span(),
+                "#[array_slots] only the final field may be a variadic Vec<ArrayRef> tail",
+            ));
+        }
+    }
+
+    let (fixed_specs, tail_spec) = match field_specs.split_last() {
+        Some((last, rest)) if matches!(last.slot_type, SlotFieldType::VariadicTail) => {
+            (rest, Some(last))
+        }
+        _ => (field_specs.as_slice(), None),
+    };
+
+    let idx_consts = fixed_specs.iter().map(SlotField::idx_const);
     let view_fields = field_specs.iter().map(SlotField::view_field);
     let view_from_slots = field_specs.iter().map(SlotField::view_from_slots);
     let view_to_owned = field_specs.iter().map(SlotField::view_to_owned);
-    let owned_from_slots = field_specs.iter().map(SlotField::owned_from_slots);
-    let into_slots = field_specs.iter().map(SlotField::storage_slot);
     let ext_methods = field_specs.iter().map(SlotField::ext_method);
-    let slot_names = field_specs.iter().map(|field| field.slot_name.as_str());
-    let slot_count = field_specs.len();
+
+    let counts = gen_counts(fixed_specs, tail_spec);
+    let from_slots = gen_from_slots(fixed_specs, tail_spec);
+    let into_slots = gen_into_slots(fixed_specs, tail_spec);
 
     Ok(quote! {
         #item_struct
@@ -159,23 +232,13 @@ fn expand_array_slots(
         impl #struct_ident {
             #(#idx_consts)*
 
-            #[doc = "Total number of slots."]
-            pub const COUNT: usize = #slot_count;
-
-            #[doc = "Slot names in storage order."]
-            pub const NAMES: [&'static str; #slot_count] = [#(#slot_names),*];
+            #counts
 
             #[doc = "Convert owned slot storage into an owned slot struct."]
-            pub fn from_slots(mut slots: ::vortex_array::ArraySlots) -> Self {
-                Self {
-                    #(#owned_from_slots,)*
-                }
-            }
+            #from_slots
 
             #[doc = "Convert this slot struct into storage order."]
-            pub fn into_slots(self) -> ::vortex_array::ArraySlots {
-                ::vortex_array::smallvec::smallvec![#(#into_slots),*]
-            }
+            #into_slots
         }
 
         #[derive(Clone, Copy, Debug)]
@@ -214,6 +277,110 @@ fn expand_array_slots(
     })
 }
 
+fn gen_counts(
+    fixed_specs: &[SlotField],
+    tail_spec: Option<&SlotField>,
+) -> proc_macro2::TokenStream {
+    let names = fixed_specs.iter().map(|field| field.slot_name.as_str());
+    let fixed_count = fixed_specs.len();
+
+    match tail_spec {
+        None => quote! {
+            #[doc = "Total number of slots."]
+            pub const COUNT: usize = #fixed_count;
+
+            #[doc = "Slot names in storage order."]
+            pub const NAMES: [&'static str; #fixed_count] = [#(#names),*];
+        },
+        Some(tail) => {
+            let offset_const = &tail.const_ident;
+            let tail_name = &tail.slot_name;
+            quote! {
+                #[doc = concat!("Offset at which the `", #tail_name, "` slots begin.")]
+                pub const #offset_const: usize = #fixed_count;
+
+                #[doc = "Number of fixed (non-variadic) slots."]
+                pub const FIXED_COUNT: usize = #fixed_count;
+
+                #[doc = "Names of the fixed slots in storage order."]
+                pub const FIXED_NAMES: [&'static str; #fixed_count] = [#(#names),*];
+
+                #[doc = "Name of the slot at the given index."]
+                pub fn slot_name(idx: usize) -> String {
+                    if idx < Self::FIXED_COUNT {
+                        Self::FIXED_NAMES[idx].to_string()
+                    } else {
+                        format!(concat!(#tail_name, "[{}]"), idx - Self::#offset_const)
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn gen_from_slots(
+    fixed_specs: &[SlotField],
+    tail_spec: Option<&SlotField>,
+) -> proc_macro2::TokenStream {
+    let owned_from_slots = fixed_specs.iter().map(SlotField::owned_from_slots);
+
+    match tail_spec {
+        None => quote! {
+            pub fn from_slots(mut slots: ::vortex_array::ArraySlots) -> Self {
+                Self {
+                    #(#owned_from_slots,)*
+                }
+            }
+        },
+        Some(tail) => {
+            let tail_ident = &tail.field_ident;
+            let offset_const = &tail.const_ident;
+            let expect_message = &tail.expect_message;
+            quote! {
+                pub fn from_slots(mut slots: ::vortex_array::ArraySlots) -> Self {
+                    let __variadic_tail: ::std::vec::Vec<::vortex_array::ArrayRef> = slots
+                        .drain(Self::#offset_const..)
+                        .map(|slot| ::vortex_error::VortexExpect::vortex_expect(
+                            slot,
+                            #expect_message,
+                        ))
+                        .collect();
+                    Self {
+                        #(#owned_from_slots,)*
+                        #tail_ident: __variadic_tail,
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn gen_into_slots(
+    fixed_specs: &[SlotField],
+    tail_spec: Option<&SlotField>,
+) -> proc_macro2::TokenStream {
+    let fixed_into_slots = fixed_specs.iter().map(SlotField::storage_slot);
+
+    match tail_spec {
+        None => quote! {
+            pub fn into_slots(self) -> ::vortex_array::ArraySlots {
+                ::vortex_array::smallvec::smallvec![#(#fixed_into_slots),*]
+            }
+        },
+        Some(tail) => {
+            let tail_ident = &tail.field_ident;
+            quote! {
+                pub fn into_slots(self) -> ::vortex_array::ArraySlots {
+                    let mut slots: ::vortex_array::ArraySlots =
+                        ::vortex_array::smallvec::smallvec![#(#fixed_into_slots),*];
+                    slots.extend(self.#tail_ident.into_iter().map(Some));
+                    slots
+                }
+            }
+        }
+    }
+}
+
 struct SlotField {
     field_ident: Ident,
     field_vis: Visibility,
@@ -232,8 +399,13 @@ impl SlotField {
             .clone()
             .ok_or_else(|| syn::Error::new(field.span(), "slot fields must be named"))?;
         let field_name = ident_name(&field_ident);
-        let const_ident = format_ident!("{}", to_screaming_snake_case(&field_name));
         let slot_type = SlotFieldType::from_syn_type(&field.ty)?;
+        let const_ident = match slot_type {
+            SlotFieldType::VariadicTail => {
+                format_ident!("{}_OFFSET", to_screaming_snake_case(&field_name))
+            }
+            _ => format_ident!("{}", to_screaming_snake_case(&field_name)),
+        };
         let expect_message = syn::LitStr::new(
             &format!("{} {} slot", ident_name(struct_ident), field_name),
             field.span(),
@@ -288,6 +460,12 @@ impl SlotField {
             SlotFieldType::Optional => quote! {
                 #field_ident: slots[#struct_ident::#const_ident].as_ref()
             },
+            SlotFieldType::VariadicTail => quote! {
+                #field_ident: ::vortex_array::SlotSlice::new(
+                    &slots[#struct_ident::#const_ident..],
+                    #expect_message,
+                )
+            },
         }
     }
 
@@ -300,6 +478,9 @@ impl SlotField {
             },
             SlotFieldType::Optional => quote! {
                 #field_ident: self.#field_ident.cloned()
+            },
+            SlotFieldType::VariadicTail => quote! {
+                #field_ident: self.#field_ident.to_vec()
             },
         }
     }
@@ -320,6 +501,9 @@ impl SlotField {
             SlotFieldType::Optional => quote! {
                 #field_ident: slots[#struct_ident::#const_ident].take()
             },
+            SlotFieldType::VariadicTail => {
+                unreachable!("variadic tail is drained before fixed fields")
+            }
         }
     }
 
@@ -333,6 +517,9 @@ impl SlotField {
             SlotFieldType::Optional => quote! {
                 self.#field_ident
             },
+            SlotFieldType::VariadicTail => {
+                unreachable!("variadic tail is appended after fixed fields")
+            }
         }
     }
 
@@ -358,6 +545,15 @@ impl SlotField {
                     self.as_ref().slots()[#struct_ident::#const_ident].as_ref()
                 }
             },
+            SlotFieldType::VariadicTail => quote! {
+                #[inline]
+                fn #field_ident(&self) -> ::vortex_array::SlotSlice<'_> {
+                    ::vortex_array::SlotSlice::new(
+                        &self.as_ref().slots()[#struct_ident::#const_ident..],
+                        #expect_message,
+                    )
+                }
+            },
         }
     }
 }
@@ -366,6 +562,7 @@ impl SlotField {
 enum SlotFieldType {
     Required,
     Optional,
+    VariadicTail,
 }
 
 impl SlotFieldType {
@@ -374,15 +571,22 @@ impl SlotFieldType {
             return Ok(Self::Required);
         }
 
-        if let Some(inner_ty) = option_inner_type(ty)
+        if let Some(inner_ty) = wrapper_inner_type(ty, "Option")
             && is_array_ref_type(inner_ty)
         {
             return Ok(Self::Optional);
         }
 
+        if let Some(inner_ty) = wrapper_inner_type(ty, "Vec")
+            && is_array_ref_type(inner_ty)
+        {
+            return Ok(Self::VariadicTail);
+        }
+
         Err(syn::Error::new(
             ty.span(),
-            "#[array_slots] fields must be ArrayRef or Option<ArrayRef>",
+            "#[array_slots] fields must be ArrayRef, Option<ArrayRef>, or (final field only) \
+             Vec<ArrayRef>",
         ))
     }
 
@@ -390,6 +594,7 @@ impl SlotFieldType {
         match self {
             Self::Required => quote! { &'a ::vortex_array::ArrayRef },
             Self::Optional => quote! { Option<&'a ::vortex_array::ArrayRef> },
+            Self::VariadicTail => quote! { ::vortex_array::SlotSlice<'a> },
         }
     }
 }
@@ -407,12 +612,12 @@ fn is_array_ref_type(ty: &Type) -> bool {
     )
 }
 
-fn option_inner_type(ty: &Type) -> Option<&Type> {
+fn wrapper_inner_type<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
     let Type::Path(type_path) = ty else {
         return None;
     };
     let segment = type_path.path.segments.last()?;
-    if segment.ident != "Option" {
+    if segment.ident != wrapper {
         return None;
     }
 

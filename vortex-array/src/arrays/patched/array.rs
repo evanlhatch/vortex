@@ -379,6 +379,13 @@ mod tests {
         maybe: Option<ArrayRef>,
     }
 
+    #[array_slots(crate::arrays::Chunked)]
+    struct VariadicSlots {
+        offsets: ArrayRef,
+        maybe_validity: Option<ArrayRef>,
+        chunks: Vec<ArrayRef>,
+    }
+
     #[test]
     fn generated_slots_round_trip() {
         let required = PrimitiveArray::new(buffer![1u8, 2, 3], Validity::NonNullable).into_array();
@@ -404,5 +411,64 @@ mod tests {
         );
         assert_eq!(rebuilt.inner.len(), required.len());
         assert_eq!(rebuilt.patch_values.len(), optional.len());
+    }
+
+    #[test]
+    fn variadic_slots_round_trip() {
+        let offsets = PrimitiveArray::new(buffer![0u64, 3, 5], Validity::NonNullable).into_array();
+        let chunk0 = PrimitiveArray::new(buffer![1u8, 2, 3], Validity::NonNullable).into_array();
+        let chunk1 = PrimitiveArray::new(buffer![4u8, 5], Validity::NonNullable).into_array();
+
+        assert_eq!(VariadicSlots::OFFSETS, 0);
+        assert_eq!(VariadicSlots::MAYBE_VALIDITY, 1);
+        assert_eq!(VariadicSlots::CHUNKS_OFFSET, 2);
+        assert_eq!(VariadicSlots::FIXED_COUNT, 2);
+        assert_eq!(VariadicSlots::slot_name(0), "offsets");
+        assert_eq!(VariadicSlots::slot_name(3), "chunks[1]");
+
+        let slot_vec = vec![Some(offsets.clone()), None, Some(chunk0), Some(chunk1)];
+
+        let view = VariadicSlotsView::from_slots(&slot_vec);
+        assert_eq!(view.offsets.len(), 3);
+        assert!(view.maybe_validity.is_none());
+        assert_eq!(view.chunks.len(), 2);
+        assert_eq!(view.chunks[0].len(), 3);
+        assert_eq!(view.chunks.get(1).map(|c| c.len()), Some(2));
+        assert!(view.chunks.get(2).is_none());
+        assert_eq!(
+            view.chunks.iter().map(|c| c.len()).collect::<Vec<_>>(),
+            vec![3, 2]
+        );
+
+        let owned = view.to_owned();
+        assert_eq!(owned.chunks.len(), 2);
+
+        let owned = VariadicSlots::from_slots(slot_vec.into());
+        assert_eq!(owned.offsets.len(), offsets.len());
+        assert!(owned.maybe_validity.is_none());
+        assert_eq!(owned.chunks.len(), 2);
+
+        let slots = owned.into_slots();
+        assert_eq!(slots.len(), 4);
+        assert!(slots[1].is_none());
+        assert_eq!(
+            slots[VariadicSlots::CHUNKS_OFFSET]
+                .as_ref()
+                .map(|c| c.len()),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn variadic_slots_empty_tail() {
+        let offsets = PrimitiveArray::new(buffer![0u64], Validity::NonNullable).into_array();
+        let slot_vec = vec![Some(offsets), None];
+
+        let view = VariadicSlotsView::from_slots(&slot_vec);
+        assert!(view.chunks.is_empty());
+
+        let owned = VariadicSlots::from_slots(slot_vec.into());
+        assert!(owned.chunks.is_empty());
+        assert_eq!(owned.into_slots().len(), 2);
     }
 }
