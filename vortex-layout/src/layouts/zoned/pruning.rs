@@ -28,9 +28,9 @@ use vortex_mask::Mask;
 use vortex_session::VortexSession;
 use vortex_utils::aliases::dash_map::DashMap;
 
-use crate::LazyReaderChildren;
-use crate::layouts::zoned::ZonedLayout;
+use crate::layouts::zoned::ZonedData;
 use crate::layouts::zoned::zone_map::ZoneMap;
+use crate::{Layout, LazyReaderChildren, VTable};
 
 type SharedZoneMap = Shared<BoxFuture<'static, SharedVortexResult<ZoneMap>>>;
 pub(super) type SharedPruningResult =
@@ -45,23 +45,26 @@ pub(super) struct PruningState {
     aggregate_fns: Arc<[AggregateFnRef]>,
     lazy_children: Arc<LazyReaderChildren>,
     session: VortexSession,
-
     pruning_result: LazyLock<DashMap<Expression, Option<SharedPruningResult>>>,
     zone_map: OnceLock<SharedZoneMap>,
     pruning_predicates: LazyLock<Arc<DashMap<Expression, PredicateCache>>>,
 }
 
 impl PruningState {
-    pub(super) fn new(
-        layout: &ZonedLayout,
+    pub(super) fn new<V>(
+        layout: Layout<V>,
+        zone_count: usize,
         aggregate_fns: Arc<[AggregateFnRef]>,
         lazy_children: Arc<LazyReaderChildren>,
         session: VortexSession,
-    ) -> Self {
+    ) -> Self
+    where
+        V: VTable<LayoutData = ZonedData>,
+    {
         Self {
-            zone_count: layout.nzones(),
+            zone_count,
             row_count: layout.row_count(),
-            zone_len: layout.zone_len() as u64,
+            zone_len: layout.zone_len as u64,
             dtype: layout.dtype().clone(),
             aggregate_fns,
             lazy_children,

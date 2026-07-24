@@ -86,35 +86,6 @@ pub type ZonedLayout = Layout<Zoned>;
 /// A legacy `vortex.stats` layout using the same runtime data.
 pub type LegacyStatsLayout = Layout<LegacyStats>;
 
-/// Builds a reader for a zoned layout, bypassing [`ZonedReader`] when the zone map is empty
-/// (`zone_len == 0`) and reading the data child directly, since there is nothing to prune with.
-/// This covers both legacy zero-length zones and layouts whose aggregates the session cannot
-/// reconstruct.
-fn zoned_reader(
-    layout: &ZonedLayout,
-    name: Arc<str>,
-    segment_source: Arc<dyn SegmentSource>,
-    session: &VortexSession,
-    ctx: &crate::LayoutReaderContext,
-) -> VortexResult<LayoutReaderRef> {
-    if layout.zone_len == 0 {
-        return layout.children.child(0, &layout.dtype)?.new_reader(
-            name,
-            segment_source,
-            session,
-            ctx,
-        );
-    }
-
-    Ok(Arc::new(ZonedReader::try_new(
-        layout.clone(),
-        name,
-        segment_source,
-        session.clone(),
-        ctx.clone(),
-    )?))
-}
-
 impl VTable for Zoned {
     type LayoutData = ZonedData;
     type Metadata = ZonedMetadata;
@@ -195,7 +166,7 @@ impl VTable for Zoned {
         session: &VortexSession,
         ctx: &LayoutReaderContext,
     ) -> VortexResult<LayoutReaderRef> {
-        zoned_reader(layout, name, segment_source, session, ctx)
+        layout.zoned_reader(name, segment_source, session, ctx)
     }
 }
 
@@ -263,11 +234,39 @@ impl VTable for LegacyStats {
         session: &VortexSession,
         ctx: &LayoutReaderContext,
     ) -> VortexResult<LayoutReaderRef> {
-        zoned_reader(&layout.0, name, segment_source, session, ctx)
+        layout.zoned_reader(name, segment_source, session, ctx)
     }
 }
 
 impl LegacyStatsLayout {
+    fn zoned_reader(
+        &self,
+        name: Arc<str>,
+        segment_source: Arc<dyn SegmentSource>,
+        session: &VortexSession,
+        ctx: &LayoutReaderContext,
+    ) -> VortexResult<LayoutReaderRef> {
+        if self.zone_len == 0 {
+            return self
+                .child(0)?
+                .new_reader(name, segment_source, session, ctx);
+        }
+
+        Ok(Arc::new(ZonedReader::try_new(
+            self.clone(),
+            self.nzones(),
+            name,
+            segment_source,
+            session.clone(),
+            ctx.clone(),
+        )?))
+    }
+
+    pub fn nzones(&self) -> usize {
+        usize::try_from(self.children().child_row_count(1))
+            .vortex_expect("Invalid number of zones, cannot handle more than usize zones")
+    }
+
     /// Returns display names for the zone-map aggregates stored by this layout.
     pub fn present_aggregates(&self) -> Arc<[String]> {
         present_aggregates(&self.zone_map_schema)
@@ -314,10 +313,6 @@ impl ZonedLayout {
         .into_typed())
     }
 
-    pub fn nzones(&self) -> usize {
-        usize::try_from(self.child_row_count(1)).vortex_expect("Invalid number of zones")
-    }
-
     pub fn zone_len(&self) -> usize {
         self.zone_len
     }
@@ -327,26 +322,49 @@ impl ZonedLayout {
         present_aggregates(&self.zone_map_schema)
     }
 
-    pub(super) fn aggregate_fns(
+    /// Builds a reader for a zoned layout, bypassing [`ZonedReader`] when the zone map is empty
+    /// (`zone_len == 0`) and reading the data child directly, since there is nothing to prune with.
+    /// This covers both legacy zero-length zones and layouts whose aggregates the session cannot
+    /// reconstruct.
+    fn zoned_reader(
         &self,
-        _session: &VortexSession,
-    ) -> VortexResult<Arc<[AggregateFnRef]>> {
+        name: Arc<str>,
+        segment_source: Arc<dyn SegmentSource>,
+        session: &VortexSession,
+        ctx: &LayoutReaderContext,
+    ) -> VortexResult<LayoutReaderRef> {
+        if self.zone_len == 0 {
+            return self
+                .child(0)?
+                .new_reader(name, segment_source, session, ctx);
+        }
+
+        Ok(Arc::new(ZonedReader::try_new(
+            self.clone(),
+            self.nzones(),
+            name,
+            segment_source,
+            session.clone(),
+            ctx.clone(),
+        )?))
+    }
+
+    pub fn nzones(&self) -> usize {
+        usize::try_from(self.children().child_row_count(1))
+            .vortex_expect("Invalid number of zones, cannot handle more than usize zones")
+    }
+}
+
+impl ZonedData {
+    fn aggregate_fns(&self) -> Arc<[AggregateFnRef]> {
         match &self.zone_map_schema {
-            ZoneMapSchema::LegacyStats(stats) => Ok(stats
+            ZoneMapSchema::LegacyStats(stats) => stats
                 .iter()
                 .filter_map(Stat::aggregate_fn)
                 .collect::<Vec<_>>()
-                .into()),
-            ZoneMapSchema::AggregateFns(aggregate_fns) => Ok(Arc::clone(aggregate_fns)),
+                .into(),
+            ZoneMapSchema::AggregateFns(aggregate_fns) => Arc::clone(aggregate_fns),
         }
-    }
-
-    pub(super) fn stats_table_dtype_for(&self, aggregate_fns: &[AggregateFnRef]) -> DType {
-        if let ZoneMapSchema::LegacyStats(stats) = &self.zone_map_schema {
-            return legacy_stats_table_dtype(self.dtype(), stats);
-        }
-
-        aggregate_stats_table_dtype(self.dtype(), aggregate_fns)
     }
 }
 
