@@ -28,9 +28,11 @@ use vortex_mask::Mask;
 use vortex_session::VortexSession;
 use vortex_utils::aliases::dash_map::DashMap;
 
+use crate::Layout;
+use crate::LazyReaderChildren;
+use crate::VTable;
 use crate::layouts::zoned::ZonedData;
 use crate::layouts::zoned::zone_map::ZoneMap;
-use crate::{Layout, LazyReaderChildren, VTable};
 
 type SharedZoneMap = Shared<BoxFuture<'static, SharedVortexResult<ZoneMap>>>;
 pub(super) type SharedPruningResult =
