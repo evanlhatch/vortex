@@ -219,8 +219,6 @@ on:
               "id": "fineweb",
               "subcommand": "fineweb",
               "name": "FineWeb NVMe",
-              "cold_io_query": "7",
-              "cold_io_samples": "5",
               "data_formats": ["parquet", "vortex", "vortex-compact"],
               "pr_targets": [
                 {"engine": "datafusion", "format": "parquet"},
@@ -472,8 +470,6 @@ on:
               "id": "fineweb",
               "subcommand": "fineweb",
               "name": "FineWeb NVMe",
-              "cold_io_query": "7",
-              "cold_io_samples": "5",
               "data_formats": ["parquet", "vortex"],
               "pr_targets": [
                 {"engine": "datafusion", "format": "parquet"},
@@ -613,24 +609,6 @@ jobs:
             --formats-json '${{ toJSON(matrix.data_formats) }}' \
             ${{ matrix.scale_factor && format('--opt scale-factor={0}', matrix.scale_factor) || '' }}
 
-      - name: Place cold benchmark data on ephemeral storage
-        if: inputs.mode == 'pr' && matrix.cold_io_query != null
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          if [ ! -d /mnt/ephemeral ]; then
-            echo "::warning::/mnt/ephemeral is unavailable; using the workspace filesystem"
-            exit 0
-          fi
-
-          source_dir="vortex-bench/data/${{ matrix.subcommand }}"
-          data_root="/mnt/ephemeral/vortex-bench-data-${{ github.run_id }}"
-          data_dir="${data_root}/${{ matrix.subcommand }}"
-          sudo install -d -o "$(id -u)" -g "$(id -g)" "$data_root"
-          mv "$source_dir" "$data_dir"
-          ln -s "$data_dir" "$source_dir"
-
       - name: Setup AWS CLI
         if: inputs.mode != 'pr' || github.event.pull_request.head.repo.fork == false
         uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b  # v6
@@ -660,9 +638,7 @@ jobs:
           extra_args: "--off-cpu-threshold=0.03"  # Personally tuned by @brancz
 
       - name: Run ${{ matrix.name }} benchmark
-        if: >-
-          (matrix.remote_storage == null || github.event.pull_request.head.repo.fork == true)
-          && (inputs.mode != 'pr' || matrix.cold_io_query == null)
+        if: matrix.remote_storage == null || github.event.pull_request.head.repo.fork == true
         shell: bash
         env:
           OTEL_SERVICE_NAME: "vortex-bench"
@@ -679,80 +655,6 @@ jobs:
             --runner "ec2_${{ inputs.machine_type }}" \
             ${{ matrix.iterations && format('--iterations {0}', matrix.iterations) || '' }} \
             ${{ matrix.scale_factor && format('--opt scale-factor={0}', matrix.scale_factor) || '' }}
-
-      - name: Run cold buffered vs direct ${{ matrix.name }} benchmark
-        if: inputs.mode == 'pr' && matrix.cold_io_query != null
-        shell: bash
-        env:
-          OTEL_SERVICE_NAME: "vortex-bench"
-          OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
-          OTEL_EXPORTER_OTLP_ENDPOINT: "${{ github.event.pull_request.head.repo.fork == false && secrets.OTEL_EXPORTER_OTLP_ENDPOINT || '' }}"
-          OTEL_EXPORTER_OTLP_HEADERS: "${{ github.event.pull_request.head.repo.fork == false && secrets.OTEL_EXPORTER_OTLP_HEADERS || '' }}"
-          OTEL_RESOURCE_ATTRIBUTES: "bench-name=${{ matrix.id }}-cold-io"
-        run: |
-          set -Eeuo pipefail
-
-          results_dir="cold-io-results"
-          mkdir -p "$results_dir"
-
-          data_file="$(find \
-            "vortex-bench/data/${{ matrix.subcommand }}/vortex-file-compressed" \
-            -type f -name '*.vortex' -print -quit)"
-          if [ -z "$data_file" ]; then
-            echo "No Vortex data file found for the cold I/O benchmark" >&2
-            exit 1
-          fi
-
-          {
-            echo "Data file: $data_file"
-            findmnt -T "$data_file"
-            lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS
-          } | tee "$results_dir/filesystem.txt"
-
-          sudo -n true
-
-          run_cold() {
-            local mode="$1"
-            local direct_io="$2"
-            local sample="$3"
-            local output="$results_dir/${mode}-${sample}.jsonl"
-            local log="$results_dir/${mode}-${sample}.log"
-
-            sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
-            if command -v fincore >/dev/null 2>&1; then
-              fincore "$data_file" | tee -a "$log"
-            fi
-
-            VORTEX_DIRECT_IO="$direct_io" \
-              bash scripts/bench-taskset.sh \
-              target/release_debug/datafusion-bench "${{ matrix.subcommand }}" \
-              --display-format gh-json \
-              --iterations 1 \
-              --hide-progress-bar \
-              --formats vortex \
-              --queries "${{ matrix.cold_io_query }}" \
-              --runner "ec2_${{ inputs.machine_type }}" \
-              --show-metrics \
-              -o "$output" 2>&1 | tee -a "$log"
-          }
-
-          for sample in $(seq 1 "${{ matrix.cold_io_samples }}"); do
-            if (( sample % 2 == 1 )); then
-              run_cold buffered 0 "$sample"
-              run_cold direct 1 "$sample"
-            else
-              run_cold direct 1 "$sample"
-              run_cold buffered 0 "$sample"
-            fi
-          done
-
-          python3 scripts/summarize-cold-io.py \
-            "$results_dir" \
-            --query "${{ matrix.cold_io_query }}" \
-            --filesystem "$results_dir/filesystem.txt" \
-            > comment.md
-          cp comment.md "$results_dir/comment.md"
-          cat comment.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run ${{ matrix.name }} benchmark (remote)
         if: matrix.remote_storage != null && (inputs.mode != 'pr' || github.event.pull_request.head.repo.fork == false)
@@ -776,9 +678,7 @@ jobs:
             ${{ matrix.scale_factor && format('--opt scale-factor={0}', matrix.scale_factor) || '' }}
 
       - name: Capture file sizes
-        if: >-
-          matrix.remote_storage == null
-          && (inputs.mode != 'pr' || matrix.cold_io_query == null)
+        if: matrix.remote_storage == null
         shell: bash
         run: |
           uv run --no-project scripts/capture-file-sizes.py \
@@ -789,7 +689,7 @@ jobs:
           cat sizes.json >> results.json
 
       - name: Compare results
-        if: inputs.mode == 'pr' && matrix.cold_io_query == null
+        if: inputs.mode == 'pr'
         shell: bash
         run: |
           set -Eeu -o pipefail -x
@@ -800,13 +700,6 @@ jobs:
           uv run --no-project scripts/compare-benchmark-jsons.py base.json results.json "${{ matrix.name }}" \
             > comment.md
           cat comment.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload cold I/O results
-        if: always() && inputs.mode == 'pr' && matrix.cold_io_query != null
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
-        with:
-          name: cold-io-${{ matrix.id }}
-          path: cold-io-results
 
       - name: Comment PR
         if: inputs.mode == 'pr' && github.event.pull_request.head.repo.fork == false

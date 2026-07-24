@@ -65,7 +65,6 @@ use vortex::session::VortexSession;
 use vortex_arrow::ArrowSessionExt;
 
 use super::cache::CachedVortexMetadata;
-use super::reader::VortexReaderFactory;
 use super::sink::VortexSink;
 use super::source::VortexSource;
 use crate::PrecisionExt as _;
@@ -124,7 +123,6 @@ const DEFAULT_FOOTER_INITIAL_READ_SIZE_BYTES: usize = MAX_POSTSCRIPT_SIZE as usi
 pub struct VortexFormat {
     session: VortexSession,
     opts: VortexTableOptions,
-    vortex_reader_factory: Option<Arc<dyn VortexReaderFactory>>,
 }
 
 impl Debug for VortexFormat {
@@ -400,31 +398,13 @@ impl VortexFormat {
 
     /// Creates a format with explicit [`VortexTableOptions`].
     pub fn new_with_options(session: VortexSession, opts: VortexTableOptions) -> Self {
-        Self {
-            session,
-            opts,
-            vortex_reader_factory: None,
-        }
+        Self { session, opts }
     }
 
     /// Returns the format-specific configuration that will be copied into the
     /// [`VortexSource`] created for a scan.
     pub fn options(&self) -> &VortexTableOptions {
         &self.opts
-    }
-
-    /// Sets a custom factory for the underlying [`VortexReadAt`] used by scans.
-    ///
-    /// Metadata inference continues to use the DataFusion object store. The custom factory is
-    /// applied to the [`VortexSource`] created for physical scan execution.
-    ///
-    /// [`VortexReadAt`]: vortex::io::VortexReadAt
-    pub fn with_vortex_reader_factory(
-        mut self,
-        vortex_reader_factory: Arc<dyn VortexReaderFactory>,
-    ) -> Self {
-        self.vortex_reader_factory = Some(vortex_reader_factory);
-        self
     }
 }
 
@@ -722,12 +702,9 @@ impl FileFormat for VortexFormat {
     }
 
     fn file_source(&self, table_schema: TableSchema) -> Arc<dyn FileSource> {
-        let mut source =
-            VortexSource::new(table_schema, self.session.clone()).with_options(self.opts.clone());
-        if let Some(vortex_reader_factory) = &self.vortex_reader_factory {
-            source = source.with_vortex_reader_factory(Arc::clone(vortex_reader_factory));
-        }
-        Arc::new(source) as _
+        Arc::new(
+            VortexSource::new(table_schema, self.session.clone()).with_options(self.opts.clone()),
+        ) as _
     }
 }
 

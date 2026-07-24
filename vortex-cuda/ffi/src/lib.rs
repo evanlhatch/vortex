@@ -25,6 +25,7 @@ use vortex::session::SessionExt;
 use vortex::session::VortexSession;
 use vortex_cuda::CudaOpenOptionsExt;
 use vortex_cuda::CudaSession;
+use vortex_cuda::PooledFileReadAtOptions;
 use vortex_cuda::arrow::ArrowDeviceArray;
 use vortex_cuda::arrow::ArrowDeviceArrayStream;
 use vortex_cuda::arrow::DeviceArrayExt;
@@ -49,16 +50,18 @@ use vortex_ffi::vx_view;
 const VX_CUDA_OK: c_int = 0;
 const VX_CUDA_ERR: c_int = 1;
 
+/// Enable direct I/O for pooled CUDA file reads.
+pub const VX_CUDA_SCAN_FLAG_DIRECT_IO: u32 = 1 << 0;
+const VX_CUDA_SCAN_KNOWN_FLAGS: u32 = VX_CUDA_SCAN_FLAG_DIRECT_IO;
+
 /// Options for scanning a CUDA-compatible Vortex file.
 ///
 /// Zero-initialize this struct to use buffered file I/O and layout-derived batch splitting.
 #[repr(C)]
 #[derive(Default)]
 pub struct vx_cuda_scan_options {
-    /// Bypass the operating system page cache for data-plane reads.
-    ///
-    /// Footer and zone-map reads remain buffered. Direct I/O is supported only on Linux.
-    pub direct_io: bool,
+    /// A bitwise combination of `VX_CUDA_SCAN_FLAG_*` values.
+    pub flags: u32,
     /// Number of rows in each output batch. Zero uses layout-derived splitting.
     pub batch_rows: usize,
 }
@@ -256,23 +259,19 @@ pub unsafe extern "C-unwind" fn vx_cuda_scan_path_arrow_device_stream_with_optio
 
         let path = unsafe { path.as_str() }?.to_owned();
         let session = session_with_cuda(unsafe { vx_session_ref(session) }?)?;
-        let (direct_io, batch_rows) = if options.is_null() {
-            (false, 0)
-        } else {
-            let options = unsafe { &*options };
-            (options.direct_io, options.batch_rows)
-        };
+        let options = unsafe { scan_options(options) }?;
         let array_stream = ffi_runtime().block_on(async {
-            let mut options = session.open_options().with_cuda();
-            if direct_io {
-                options = options.with_direct_io();
-            }
-            let file = options.open_path(path).await?;
+            let file = session
+                .open_options()
+                .with_cuda()
+                .with_read_at_options(options.read_at_options)
+                .open_path(path)
+                .await?;
             let scan = file.scan()?;
-            let scan = if batch_rows == 0 {
+            let scan = if options.batch_rows == 0 {
                 scan
             } else {
-                scan.with_split_by(SplitBy::RowCount(batch_rows))
+                scan.with_split_by(SplitBy::RowCount(options.batch_rows))
             };
             Ok::<_, vortex::error::VortexError>(scan.into_array_stream()?.boxed())
         })?;
@@ -280,6 +279,46 @@ pub unsafe extern "C-unwind" fn vx_cuda_scan_path_arrow_device_stream_with_optio
 
         unsafe { ptr::write(out_stream, device_stream) };
         Ok(VX_CUDA_OK)
+    })
+}
+
+struct CudaScanOptions {
+    read_at_options: PooledFileReadAtOptions,
+    batch_rows: usize,
+}
+
+unsafe fn scan_options(options: *const vx_cuda_scan_options) -> VortexResult<CudaScanOptions> {
+    let (flags, batch_rows) = if options.is_null() {
+        (0, 0)
+    } else {
+        let options = unsafe { &*options };
+        (options.flags, options.batch_rows)
+    };
+    vortex_ensure!(
+        flags & !VX_CUDA_SCAN_KNOWN_FLAGS == 0,
+        "unsupported CUDA scan option flags: {:#x}",
+        flags & !VX_CUDA_SCAN_KNOWN_FLAGS
+    );
+
+    let read_at_options = PooledFileReadAtOptions::default();
+    let read_at_options = if flags & VX_CUDA_SCAN_FLAG_DIRECT_IO == 0 {
+        read_at_options
+    } else {
+        #[cfg(target_os = "linux")]
+        {
+            read_at_options.with_direct_io()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err(vortex::error::vortex_err!(
+                "direct CUDA file I/O is only supported on Linux"
+            ));
+        }
+    };
+
+    Ok(CudaScanOptions {
+        read_at_options,
+        batch_rows,
     })
 }
 
@@ -389,8 +428,44 @@ mod tests {
     #[test]
     fn scan_options_default_to_buffered_io() {
         let options = vx_cuda_scan_options::default();
-        assert!(!options.direct_io);
+        assert_eq!(options.flags, 0);
         assert_eq!(options.batch_rows, 0);
+    }
+
+    #[test]
+    fn rejects_unknown_scan_option_flags() {
+        let options = vx_cuda_scan_options {
+            flags: 1 << 31,
+            ..Default::default()
+        };
+        assert!(unsafe { scan_options(&raw const options) }.is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn maps_direct_io_scan_option_to_pooled_reader() -> VortexResult<()> {
+        let options = vx_cuda_scan_options {
+            flags: VX_CUDA_SCAN_FLAG_DIRECT_IO,
+            ..Default::default()
+        };
+        assert_eq!(
+            unsafe { scan_options(&raw const options) }?.read_at_options,
+            PooledFileReadAtOptions::default().with_direct_io()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maps_batch_rows_scan_option() -> VortexResult<()> {
+        let options = vx_cuda_scan_options {
+            batch_rows: 8192,
+            ..Default::default()
+        };
+        assert_eq!(
+            unsafe { scan_options(&raw const options) }?.batch_rows,
+            8192
+        );
+        Ok(())
     }
 
     fn test_session(session: VortexSession) -> *mut vx_session {

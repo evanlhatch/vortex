@@ -12,8 +12,6 @@ use vortex_buffer::ByteBuffer;
 use vortex_error::VortexError;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
-#[cfg(not(target_os = "linux"))]
-use vortex_error::vortex_bail;
 use vortex_error::vortex_err;
 use vortex_io::VortexReadAt;
 use vortex_io::session::RuntimeSessionExt;
@@ -77,8 +75,6 @@ pub struct VortexOpenOptions {
     labels: Vec<Label>,
     /// Whether to cache file's LayoutReader between scans
     cache_layout_reader: bool,
-    /// Whether local data reads should bypass the operating system page cache.
-    direct_io: bool,
 }
 
 /// Extension trait for constructing [`VortexOpenOptions`] from a session.
@@ -98,7 +94,6 @@ pub trait OpenOptionsSessionExt:
             metrics_registry: None,
             labels: Vec::default(),
             cache_layout_reader: false,
-            direct_io: false,
         }
     }
 }
@@ -129,15 +124,6 @@ impl VortexOpenOptions {
     /// cost of keeping reader state alive for the lifetime of the file handle.
     pub fn with_layout_reader_cache(mut self) -> Self {
         self.cache_layout_reader = true;
-        self
-    }
-
-    /// Read local file data with direct I/O, bypassing the operating system page cache.
-    ///
-    /// This option applies to [`Self::open_path`] and is supported only on Linux. Footer discovery
-    /// continues to use buffered I/O.
-    pub fn with_direct_io(mut self) -> Self {
-        self.direct_io = true;
         self
     }
 
@@ -242,32 +228,10 @@ impl VortexOpenOptions {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn open_path(self, path: impl AsRef<std::path::Path>) -> VortexResult<VortexFile> {
         use vortex_io::std_file::FileReadAt;
-        let path = path.as_ref();
         let handle = self.session.handle();
         let allocator = self.session.allocator();
-        if !self.direct_io {
-            let source = Arc::new(FileReadAt::open_with_allocator(path, handle, allocator)?);
-            return self.open(source).await;
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        vortex_bail!("direct file I/O is only supported on Linux");
-
-        #[cfg(target_os = "linux")]
-        {
-            let mut options = self;
-            if options.footer.is_none() {
-                let buffered =
-                    FileReadAt::open_with_allocator(path, handle.clone(), Arc::clone(&allocator))?;
-                let footer = options.read_footer(&buffered).await?.footer;
-                options = options.with_footer(footer);
-            }
-
-            let source = Arc::new(FileReadAt::open_direct_with_allocator(
-                path, handle, allocator,
-            )?);
-            options.open(source).await
-        }
+        let source = Arc::new(FileReadAt::open_with_allocator(path, handle, allocator)?);
+        self.open(source).await
     }
 
     /// Open a Vortex file from an in-memory buffer.

@@ -78,6 +78,25 @@ struct DirectIoRange {
     requested_range: std::ops::Range<usize>,
 }
 
+/// Options controlling how [`PooledFileReadAt`] opens and reads a local file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PooledFileReadAtOptions {
+    direct_io: bool,
+}
+
+impl PooledFileReadAtOptions {
+    /// Bypass the operating system page cache for pooled file reads.
+    ///
+    /// This option is available only on Linux. Unaligned logical reads are widened to satisfy the
+    /// filesystem's direct-I/O requirements and sliced back to the requested range after transfer
+    /// to the device.
+    #[cfg(target_os = "linux")]
+    pub fn with_direct_io(mut self) -> Self {
+        self.direct_io = true;
+        self
+    }
+}
+
 /// File reader that uses CUDA pinned host memory for I/O buffers and transfers
 /// directly to the GPU.
 ///
@@ -107,6 +126,30 @@ impl PooledFileReadAt {
         pool: Arc<PinnedByteBufferPool>,
         stream: VortexCudaStream,
     ) -> VortexResult<Self> {
+        Self::open_with_options(
+            path,
+            handle,
+            pool,
+            stream,
+            PooledFileReadAtOptions::default(),
+        )
+    }
+
+    /// Open a file for pooled reading with explicit options.
+    pub fn open_with_options(
+        path: impl AsRef<Path>,
+        handle: Handle,
+        pool: Arc<PinnedByteBufferPool>,
+        stream: VortexCudaStream,
+        options: PooledFileReadAtOptions,
+    ) -> VortexResult<Self> {
+        #[cfg(target_os = "linux")]
+        if options.direct_io {
+            return Self::open_direct(path, handle, pool, stream);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = options;
+
         let path = path.as_ref();
         let uri = Arc::from(path.to_string_lossy().to_string());
         let file = Arc::new(File::open(path)?);
@@ -123,12 +166,8 @@ impl PooledFileReadAt {
         })
     }
 
-    /// Open a file for pooled direct I/O with direct device transfer.
-    ///
-    /// Direct I/O bypasses the operating system page cache. Unaligned logical reads are widened
-    /// to aligned physical reads and sliced to the requested range after transfer to the device.
     #[cfg(target_os = "linux")]
-    pub fn open_direct(
+    fn open_direct(
         path: impl AsRef<Path>,
         handle: Handle,
         pool: Arc<PinnedByteBufferPool>,
@@ -602,6 +641,21 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[test]
+    fn pooled_file_read_options_default_to_buffered_io() {
+        assert!(!PooledFileReadAtOptions::default().direct_io);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pooled_file_read_options_enable_direct_io() {
+        assert!(
+            PooledFileReadAtOptions::default()
+                .with_direct_io()
+                .direct_io
+        );
+    }
 
     #[rstest]
     #[case(0, 0, 4096, 0, 0, 0)]

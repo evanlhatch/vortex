@@ -99,10 +99,13 @@ vx_array_sink *vx_cuda_array_sink_open_file_block_rows(const vx_session *session
  *
  * Zero-initialize this struct to use buffered file I/O and layout-derived batch splitting.
  */
+/** Bypass the operating system page cache for pooled data-plane reads.
+ * Footer and zone-map reads remain buffered. Supported only on Linux. */
+#define VX_CUDA_SCAN_FLAG_DIRECT_IO (UINT32_C(1) << 0)
+
 typedef struct vx_cuda_scan_options {
-    /** Bypass the operating system page cache for data-plane reads.
-     * Footer and zone-map reads remain buffered. Supported only on Linux. */
-    bool direct_io;
+    /** Bitwise combination of `VX_CUDA_SCAN_FLAG_*` values. */
+    uint32_t flags;
     /** Number of rows in each output ArrowDeviceArray. Zero uses layout-derived splitting. */
     size_t batch_rows;
 } vx_cuda_scan_options;

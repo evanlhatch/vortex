@@ -25,5 +25,5 @@ and receive an Arrow C Device stream. Reuse the same CUDA session across scans s
 pool and CUDA state are reused as well.
 
 On Linux, use `vx_cuda_scan_path_arrow_device_stream_with_options` with
-`vx_cuda_scan_options.direct_io = true` to bypass the operating system page cache for data-plane
-reads. Footer and zone-map reads remain buffered on the host.
+`vx_cuda_scan_options.flags = VX_CUDA_SCAN_FLAG_DIRECT_IO` to bypass the operating system page
+cache for pooled data-plane reads. Footer and zone-map reads remain buffered on the host.

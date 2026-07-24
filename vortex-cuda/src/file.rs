@@ -20,6 +20,7 @@ use vortex::layout::segments::SegmentSource;
 
 use crate::CudaSessionExt;
 use crate::PooledFileReadAt;
+use crate::PooledFileReadAtOptions;
 use crate::layout::register_cuda_layout;
 
 /// Extension trait for opening CUDA-readable files from [`VortexOpenOptions`].
@@ -33,7 +34,7 @@ impl CudaOpenOptionsExt for VortexOpenOptions {
     fn with_cuda(self) -> CudaOpenOptions {
         CudaOpenOptions {
             inner: self,
-            direct_io: false,
+            read_at_options: PooledFileReadAtOptions::default(),
         }
     }
 }
@@ -44,16 +45,15 @@ impl CudaOpenOptionsExt for VortexOpenOptions {
 /// configured before calling `with_cuda`.
 pub struct CudaOpenOptions {
     inner: VortexOpenOptions,
-    direct_io: bool,
+    read_at_options: PooledFileReadAtOptions,
 }
 
 impl CudaOpenOptions {
-    /// Read data-plane segments with direct I/O, bypassing the operating system page cache.
+    /// Configure how the pooled data-plane reader opens and reads the local file.
     ///
-    /// This option is currently supported only on Linux. Footer and zone-map reads continue to
-    /// use buffered host I/O.
-    pub fn with_direct_io(mut self) -> Self {
-        self.direct_io = true;
+    /// Footer and zone-map reads continue to use the standard buffered host reader.
+    pub fn with_read_at_options(mut self, options: PooledFileReadAtOptions) -> Self {
+        self.read_at_options = options;
         self
     }
 
@@ -78,19 +78,13 @@ impl CudaOpenOptions {
         let pool = Arc::clone(cuda_session.pinned_buffer_pool());
         drop(cuda_session);
 
-        let reader = if self.direct_io {
-            #[cfg(target_os = "linux")]
-            {
-                PooledFileReadAt::open_direct(&path, session.handle(), pool, stream)?
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                vortex_bail!("direct CUDA file I/O is only supported on Linux")
-            }
-        } else {
-            PooledFileReadAt::open(&path, session.handle(), pool, stream)?
-        };
-        let reader = Arc::new(reader);
+        let reader = Arc::new(PooledFileReadAt::open_with_options(
+            &path,
+            session.handle(),
+            pool,
+            stream,
+            self.read_at_options,
+        )?);
         let data_file = data_options
             .with_footer(footer.clone())
             .open(reader)
