@@ -37,8 +37,6 @@ jobs:
         run: uv run --no-project docs/generate_changelog.py
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install Doxygen
-        uses: ssciwr/doxygen-install@329d88f5a303066a5bd006db7516b1925b86350e  # v2
       - name: Generate Javadoc for Java projects
         run: |
           cd java

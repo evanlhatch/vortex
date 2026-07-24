@@ -5,37 +5,33 @@
 The `vx` command-line tool lets you convert, inspect, browse, and query Vortex files from
 the terminal.
 
-::::{tab-set}
-
-:::{tab-item} Binstall (recommended)
+````{tab} Binstall (recommended)
 ```bash
 cargo binstall vortex-tui
 ```
 Downloads a pre-built binary. Requires [cargo-binstall](https://github.com/cargo-bins/cargo-binstall).
-:::
+````
 
-:::{tab-item} pip
+````{tab} pip
 ```bash
 pip install vortex-data
 ```
 This also installs the Python library. See the [Python quickstart](python.rst) for library usage.
-:::
+````
 
-:::{tab-item} uvx
+````{tab} uvx
 ```bash
 uvx --from vortex-data vx --help
 ```
 Runs the CLI without installing. Requires [uv](https://docs.astral.sh/uv/).
-:::
+````
 
-:::{tab-item} Cargo
+````{tab} Cargo
 ```bash
 cargo install vortex-tui
 ```
 Builds from source. This can be slow due to the large dependency tree.
-:::
-
-::::
+````
 
 Verify the installation:
 
