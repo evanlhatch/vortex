@@ -86,6 +86,35 @@ pub type ZonedLayout = Layout<Zoned>;
 /// A legacy `vortex.stats` layout using the same runtime data.
 pub type LegacyStatsLayout = Layout<LegacyStats>;
 
+/// Builds a reader for a zoned layout, bypassing [`ZonedReader`] when the zone map is empty
+/// (`zone_len == 0`) and reading the data child directly, since there is nothing to prune with.
+/// This covers both legacy zero-length zones and layouts whose aggregates the session cannot
+/// reconstruct.
+fn zoned_reader(
+    layout: &ZonedLayout,
+    name: Arc<str>,
+    segment_source: Arc<dyn SegmentSource>,
+    session: &VortexSession,
+    ctx: &crate::LayoutReaderContext,
+) -> VortexResult<LayoutReaderRef> {
+    if layout.zone_len == 0 {
+        return layout.children.child(0, &layout.dtype)?.new_reader(
+            name,
+            segment_source,
+            session,
+            ctx,
+        );
+    }
+
+    Ok(Arc::new(ZonedReader::try_new(
+        layout.clone(),
+        name,
+        segment_source,
+        session.clone(),
+        ctx.clone(),
+    )?))
+}
+
 impl VTable for Zoned {
     type LayoutData = ZonedData;
     type Metadata = ZonedMetadata;
@@ -166,13 +195,7 @@ impl VTable for Zoned {
         session: &VortexSession,
         ctx: &LayoutReaderContext,
     ) -> VortexResult<LayoutReaderRef> {
-        Ok(Arc::new(ZonedReader::try_new(
-            layout.clone(),
-            name,
-            segment_source,
-            session.clone(),
-            ctx.clone(),
-        )?))
+        zoned_reader(layout, name, segment_source, session, ctx)
     }
 }
 
@@ -240,22 +263,7 @@ impl VTable for LegacyStats {
         session: &VortexSession,
         ctx: &LayoutReaderContext,
     ) -> VortexResult<LayoutReaderRef> {
-        let zoned = LayoutParts::new(
-            Zoned,
-            layout.dtype().clone(),
-            layout.row_count(),
-            layout.segment_ids().to_vec(),
-            Arc::clone(layout.children()),
-            layout.data().clone(),
-        )
-        .into_typed();
-        Ok(Arc::new(ZonedReader::try_new(
-            zoned,
-            name,
-            segment_source,
-            session.clone(),
-            ctx.clone(),
-        )?))
+        zoned_reader(&layout.0, name, segment_source, session, ctx)
     }
 }
 
