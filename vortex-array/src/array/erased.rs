@@ -90,9 +90,26 @@ impl ArrayRef {
     }
 
     /// Returns a mutable reference to the inner if this is the sole owner.
+    /// Returns `None` if the `Arc` is shared (refcount > 1).
     #[inline(always)]
     pub(crate) fn inner_mut(&mut self) -> Option<&mut ArrayInner<dyn DynArrayData>> {
         Arc::get_mut(&mut self.0)
+    }
+
+    /// If this is the sole owner, return a mutable reference to the typed array data.
+    /// Returns `None` if the `Arc` is shared (refcount > 1) or the encoding doesn't match.
+    ///
+    /// This is the in-place mutation primitive. No allocation, no rebuild.
+    /// Mirrors `as_opt::<V>()` for immutable access, but returns `&mut V::TypedArrayData`.
+    ///
+    /// When `None` is returned (shared Arc), the caller must materialize to Primitive
+    /// and rebuild. This only happens on forked columns (first mutation after fork).
+    /// On the hot path (column store owns the Arc), refcount is always 1 → always `Some`.
+    #[inline(always)]
+    pub fn try_as_mut<V: VTable>(&mut self) -> Option<&mut V::TypedArrayData> {
+        let inner = self.inner_mut()?;
+        let data = inner.data.as_any_mut().downcast_mut::<ArrayData<V>>()?;
+        Some(&mut data.data)
     }
 
     /// Returns the Arc::as_ptr().addr() of the underlying array.

@@ -109,9 +109,12 @@ impl<V: VTable> TypedArrayRef<V> for ArrayView<'_, V> {}
 
 /// A VTable and its instance data, this can be type-erased to [`DynArrayData`](DynArrayData).
 #[doc(hidden)]
-pub(crate) struct ArrayData<V: VTable> {
-    pub(crate) vtable: V,
-    pub(crate) data: V::TypedArrayData,
+/// The typed data stored inside an `ArrayInner`: the vtable + the encoding-specific data.
+///
+/// Made `pub` so that `try_as_mut::<V>()` can reach `V::TypedArrayData` after downcast.
+pub struct ArrayData<V: VTable> {
+    pub vtable: V,
+    pub data: V::TypedArrayData,
 }
 
 impl<V: VTable> ArrayInner<ArrayData<V>> {

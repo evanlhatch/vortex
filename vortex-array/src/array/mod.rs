@@ -120,6 +120,8 @@ pub(crate) trait DynArrayData: 'static + private::Sealed + Send + Sync + Debug {
     fn as_any(&self) -> &dyn Any;
 
     /// Returns the array as a mutable reference to a generic [`Any`] trait object.
+    /// Returns the array as a mutable reference to a generic [`Any`] trait object.
+    /// Used by `try_as_mut` for in-place mutation without consuming the array.
     fn as_any_mut(&mut self) -> &mut dyn Any;
 
     /// Returns the [`Validity`] of the array.

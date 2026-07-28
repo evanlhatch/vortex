@@ -624,4 +624,25 @@ impl PrimitiveData {
         let buffer = Buffer::<T>::from_byte_buffer(self.buffer.into_host_sync());
         buffer.try_into_mut()
     }
+
+    /// Non-consuming mutable buffer access. Works on `&mut self` instead of consuming.
+    /// Returns `None` if the buffer is shared (refcount > 1).
+    ///
+    /// This avoids the `try_into_parts` + rebuild cycle that allocates a new `Arc<ArrayInner>`.
+    /// Instead, it clones the `BufferHandle`'s `ByteBuffer` (an `Arc<[u8]>` refcount bump —
+    /// not a data copy), then calls `try_into_mut()` which succeeds if the buffer is unique.
+    ///
+    /// # Panic
+    /// If the buffer is not of type T this will panic.
+    pub fn try_buffer_mut<T: NativePType>(&mut self) -> Option<BufferMut<T>> {
+        if T::PTYPE != self.ptype() {
+            vortex_panic!(
+                "Attempted to get buffer_mut of type {} from array of type {}",
+                T::PTYPE,
+                self.ptype()
+            )
+        }
+        let buffer = Buffer::<T>::from_byte_buffer(self.buffer.as_host().clone());
+        buffer.try_into_mut().ok()
+    }
 }
