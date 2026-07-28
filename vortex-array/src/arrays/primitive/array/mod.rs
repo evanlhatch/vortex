@@ -628,13 +628,16 @@ impl PrimitiveData {
     /// Non-consuming mutable buffer access. Works on `&mut self` instead of consuming.
     /// Returns `None` if the buffer is shared (refcount > 1).
     ///
-    /// This avoids the `try_into_parts` + rebuild cycle that allocates a new `Arc<ArrayInner>`.
-    /// Instead, it clones the `BufferHandle`'s `ByteBuffer` (an `Arc<[u8]>` refcount bump —
-    /// not a data copy), then calls `try_into_mut()` which succeeds if the buffer is unique.
+    /// Non-consuming mutable buffer access. Works on `&mut self`.
+    /// Returns `None` if the buffer is shared (refcount > 1).
+    ///
+    /// Uses `std::mem::take` to extract the `ByteBuffer` (unique ownership, refcount 1),
+    /// then `try_into_mut()` to get `BufferMut<T>`. The `BufferMutGuard` puts the
+    /// mutated buffer back into `PrimitiveData` on drop — zero data loss, zero alloc.
     ///
     /// # Panic
     /// If the buffer is not of type T this will panic.
-    pub fn try_buffer_mut<T: NativePType>(&mut self) -> Option<BufferMut<T>> {
+    pub fn try_buffer_mut<T: NativePType>(&mut self) -> Option<BufferMutGuard<'_, T>> {
         if T::PTYPE != self.ptype() {
             vortex_panic!(
                 "Attempted to get buffer_mut of type {} from array of type {}",
@@ -642,7 +645,45 @@ impl PrimitiveData {
                 self.ptype()
             )
         }
-        let buffer = Buffer::<T>::from_byte_buffer(self.buffer.as_host().clone());
-        buffer.try_into_mut().ok()
+        // Take the ByteBuffer out — unique ownership, no clone (clone would bump refcount and fail)
+        let byte_buffer = std::mem::take(self.buffer.as_host_mut());
+        let buffer = Buffer::<T>::from_byte_buffer(byte_buffer);
+        match buffer.try_into_mut() {
+            Ok(buf_mut) => Some(BufferMutGuard {
+                buf_mut,
+                slot: self.buffer.as_host_mut(),
+            }),
+            Err(original_buffer) => {
+                // Can't get mutable access — restore the original buffer
+                *self.buffer.as_host_mut() = original_buffer.into_byte_buffer();
+                None
+            }
+        }
     }
+}
+
+/// A guard that holds a `BufferMut<T>` extracted from a `PrimitiveData`.
+/// On drop, freezes the `BufferMut` back into the `PrimitiveData`'s `ByteBuffer` slot.
+/// This enables zero-alloc in-place mutation: the buffer is taken out, mutated, and put back.
+pub struct BufferMutGuard<'a, T: NativePType> {
+    buf_mut: BufferMut<T>,
+    slot: &'a mut ByteBuffer,
+}
+
+impl<T: NativePType> Drop for BufferMutGuard<'_, T> {
+    fn drop(&mut self) {
+        // Freeze the BufferMut back to a Buffer<T> and put it in the slot
+        let buf_mut = std::mem::take(&mut self.buf_mut);
+        let byte_buffer = buf_mut.freeze().into_byte_buffer();
+        *self.slot = byte_buffer;
+    }
+}
+
+impl<T: NativePType> std::ops::Deref for BufferMutGuard<'_, T> {
+    type Target = BufferMut<T>;
+    fn deref(&self) -> &Self::Target { &self.buf_mut }
+}
+
+impl<T: NativePType> std::ops::DerefMut for BufferMutGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.buf_mut }
 }

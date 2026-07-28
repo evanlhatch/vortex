@@ -271,6 +271,16 @@ impl BufferHandle {
         self.as_host_opt().vortex_expect("expected host buffer")
     }
 
+    /// Mutable version of [`as_host`][Self::as_host]. Panics if not a host allocation.
+    /// Used by `try_buffer_mut` to take the buffer out via `std::mem::take`.
+    #[inline]
+    pub fn as_host_mut(&mut self) -> &mut ByteBuffer {
+        match &mut self.0 {
+            Inner::Host(buffer) => buffer,
+            _ => panic!("expected host buffer"),
+        }
+    }
+
     /// A version of [`as_device_opt`][Self::as_device_opt] that panics if the allocation is
     /// not a device allocation.
     pub fn as_device(&self) -> &Arc<dyn DeviceBuffer> {
