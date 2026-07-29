@@ -28,7 +28,7 @@ pub struct FoRSlots {
 /// storage requirements when values are clustered around a specific point.
 #[derive(Clone, Debug)]
 pub struct FoRData {
-    pub(super) reference: Scalar,
+    pub reference: Scalar,
 }
 
 pub trait FoRArrayExt: FoRArraySlotsExt {

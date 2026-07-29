@@ -11,7 +11,7 @@ use crate::scalar::Scalar;
 
 #[derive(Clone, Debug)]
 pub struct ConstantData {
-    pub(super) scalar: Scalar,
+    pub scalar: Scalar,
 }
 
 impl Display for ConstantData {

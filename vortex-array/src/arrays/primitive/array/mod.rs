@@ -687,3 +687,22 @@ impl<T: NativePType> std::ops::Deref for BufferMutGuard<'_, T> {
 impl<T: NativePType> std::ops::DerefMut for BufferMutGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target { &mut self.buf_mut }
 }
+
+impl<'a, T: NativePType> BufferMutGuard<'a, T> {
+    /// Consume the guard and take the buffer WITHOUT putting it back.
+    /// The PrimitiveArray's buffer slot is left empty (default ByteBuffer) —
+    /// the array is consumed. The frozen `Buffer<T>` is returned directly.
+    ///
+    /// Zero-copy Dense Delta construction: the mutated buffer moves into the
+    /// Delta without a `slice.to_vec()` copy or an `Arc::clone`.
+    pub fn take_buffer(self) -> Buffer<T> {
+        let mut me = std::mem::ManuallyDrop::new(self);
+        // Write a default ByteBuffer to the slot (replaces the real one).
+        *me.slot = ByteBuffer::default();
+        // Take buf_mut out and freeze it — the real buffer, returned to caller.
+        // ManuallyDrop prevents Drop from running (which would try to freeze
+        // buf_mut back into the slot, but we already set the slot to default).
+        let buf_mut = std::mem::take(&mut me.buf_mut);
+        buf_mut.freeze()
+    }
+}
