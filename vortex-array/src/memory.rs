@@ -8,7 +8,6 @@ use std::fmt::Debug;
 use std::mem::size_of;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use vortex_buffer::Alignment;
 use vortex_buffer::Buffer;
 use vortex_buffer::ByteBuffer;
@@ -255,16 +254,6 @@ struct DefaultWritableHostBuffer {
     alignment: Alignment,
 }
 
-#[derive(Debug)]
-struct HostBufferOwner {
-    buffer: ByteBufferMut,
-}
-
-impl AsRef<[u8]> for HostBufferOwner {
-    fn as_ref(&self) -> &[u8] {
-        self.buffer.as_slice()
-    }
-}
 
 impl HostBufferMut for DefaultWritableHostBuffer {
     fn len(&self) -> usize {
@@ -280,9 +269,11 @@ impl HostBufferMut for DefaultWritableHostBuffer {
     }
 
     fn freeze(self: Box<Self>) -> ByteBuffer {
-        let Self { buffer, alignment } = *self;
-        let bytes = Bytes::from_owner(HostBufferOwner { buffer });
-        ByteBuffer::from_bytes_aligned(bytes, alignment)
+        let Self { buffer, .. } = *self;
+        // Use BufferMut::freeze() which calls BytesMut::freeze(), producing
+        // a Bytes with the promotable vtable where is_unique() works correctly.
+        // This enables zero-copy try_into_mut() downstream.
+        buffer.freeze()
     }
 }
 

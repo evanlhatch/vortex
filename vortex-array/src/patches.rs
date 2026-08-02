@@ -296,15 +296,18 @@ impl Patches {
         })
     }
 
-    /// Construct new patches without validating any of the arguments
+    /// Construct new patches without validating any of the arguments.
     ///
-    /// # Safety
+    /// This is a safe wrapper that sets `chunk_offsets = None` and
+    /// `offset_within_chunk = None` — the common case for Flatland's
+    /// single-chunk patches.
     ///
-    /// Users have to assert that
+    /// # Safety (caller guarantees)
+    ///
     /// * Indices and values have the same length
-    /// * Indices is an unsigned integer type
-    /// * Indices must be sorted
-    /// * Last value in indices is smaller than array_len
+    /// * Indices is a non-nullable unsigned integer type
+    /// * Values dtype matches the expected column dtype
+    /// * Indices are sorted and in bounds `[0, array_len)`
     pub unsafe fn new_unchecked(
         array_len: usize,
         offset: usize,
@@ -320,6 +323,93 @@ impl Patches {
             values,
             chunk_offsets,
             offset_within_chunk,
+        }
+    }
+
+    /// Merge another Patches into this one. Sorted-index union, last-write-wins.
+    /// Works on flat patches (no chunk_offsets). For chunked patches, returns None.
+    pub fn try_merge(&mut self, other: &Self) -> Option<()> {
+        // Only supports flat patches (no chunk_offsets)
+        if self.chunk_offsets.is_some() || other.chunk_offsets.is_some() {
+            return None;
+        }
+        use crate::arrays::Primitive;
+        let self_indices = self.indices.as_opt::<Primitive>()?;
+        let other_indices = other.indices.as_opt::<Primitive>()?;
+        let self_values = self.values.as_opt::<Primitive>()?;
+        let other_values = other.values.as_opt::<Primitive>()?;
+
+        let mut merged_indices = Vec::<u32>::with_capacity(self_indices.len() + other_indices.len());
+        let mut merged_values = Vec::<u32>::with_capacity(self_values.len() + other_values.len());
+
+        let mut si = 0;
+        let mut oi = 0;
+        let sl = self_indices.as_slice::<u32>();
+        let ol = other_indices.as_slice::<u32>();
+        let sv = self_values.as_slice::<u32>();
+        let ov = other_values.as_slice::<u32>();
+
+        while si < sl.len() && oi < ol.len() {
+            if sl[si] < ol[oi] {
+                merged_indices.push(sl[si]);
+                merged_values.push(sv[si]);
+                si += 1;
+            } else if sl[si] > ol[oi] {
+                merged_indices.push(ol[oi]);
+                merged_values.push(ov[oi]);
+                oi += 1;
+            } else {
+                // Same index — last-write-wins (other wins)
+                merged_indices.push(ol[oi]);
+                merged_values.push(ov[oi]);
+                si += 1;
+                oi += 1;
+            }
+        }
+        while si < sl.len() { merged_indices.push(sl[si]); merged_values.push(sv[si]); si += 1; }
+        while oi < ol.len() { merged_indices.push(ol[oi]); merged_values.push(ov[oi]); oi += 1; }
+
+        self.indices = PrimitiveArray::from_iter(merged_indices).into_array();
+        self.values = PrimitiveArray::from_iter(merged_values).into_array();
+        self.array_len = self.array_len.max(other.array_len);
+        Some(())
+    }
+
+    /// Replace the current values with `new_values` (for revert).
+    /// The new_values Patches must have the same array_len and indices.
+    pub fn revert_with(&mut self, new_values: &Self) -> Option<()> {
+        if self.array_len != new_values.array_len {
+            return None;
+        }
+        self.values = new_values.values.clone();
+        Some(())
+    }
+
+    /// Construct new patches without validation, for the simple case of
+    /// single-chunk patches (no chunk_offsets, no offset_within_chunk).
+    ///
+    /// This is the Flatland hot-path constructor — called for every overlay
+    /// where indices and values are known-valid PrimitiveArrays.
+    ///
+    /// # Safety (caller guarantees)
+    ///
+    /// * `indices.len() == values.len()`
+    /// * `indices` is a non-nullable unsigned integer PrimitiveArray
+    /// * `values` dtype matches the column dtype
+    /// * All indices are in bounds `[offset, offset + array_len)`
+    pub unsafe fn new_simple_unchecked(
+        array_len: usize,
+        offset: usize,
+        indices: ArrayRef,
+        values: ArrayRef,
+    ) -> Self {
+        Self {
+            array_len,
+            offset,
+            indices,
+            values,
+            chunk_offsets: None,
+            offset_within_chunk: None,
         }
     }
 

@@ -635,27 +635,28 @@ impl<T> FromIterator<T> for Buffer<T> {
     }
 }
 
-// Helper struct to allow us to zero-copy any vec into a buffer
-#[repr(transparent)]
-struct Wrapper<T>(Vec<T>);
-
-impl<T> AsRef<[u8]> for Wrapper<T> {
-    fn as_ref(&self) -> &[u8] {
-        let data = self.0.as_ptr().cast::<u8>();
-        let len = self.0.len() * size_of::<T>();
-        unsafe { std::slice::from_raw_parts(data, len) }
-    }
-}
-
 impl<T> From<Vec<T>> for Buffer<T>
 where
     T: Send + 'static,
 {
-    fn from(value: Vec<T>) -> Self {
+    fn from(mut value: Vec<T>) -> Self {
         let original_len = value.len();
-        let wrapped_vec = Wrapper(value);
 
-        let bytes = Bytes::from_owner(wrapped_vec);
+        // Convert Vec<T> → Vec<u8> zero-copy (same heap allocation, reinterpret bytes).
+        // This lets us use Bytes::from(Vec<u8>) which uses the promotable vtable,
+        // where is_unique() returns true when ref_cnt == 1 — enabling zero-copy
+        // try_into_mut(). Bytes::from_owner() uses the Owned vtable where
+        // is_unique() ALWAYS returns false, forcing a clone on every mutation.
+        let ptr = value.as_mut_ptr() as *mut u8;
+        let len = value.len() * size_of::<T>();
+        let cap = value.capacity() * size_of::<T>();
+        // Prevent Vec<T>'s destructor from freeing the allocation.
+        std::mem::forget(value);
+        // SAFETY: ptr came from a valid Vec<T> allocation; len/cap are the byte
+        // equivalents; alignment of u8 (1) is satisfied by any pointer.
+        let vec_bytes: Vec<u8> = unsafe { Vec::from_raw_parts(ptr, len, cap) };
+
+        let bytes = Bytes::from(vec_bytes);
 
         assert_eq!(bytes.as_ptr().align_offset(align_of::<T>()), 0);
 

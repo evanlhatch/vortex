@@ -12,6 +12,8 @@ use std::sync::Arc;
 use vortex_buffer::ByteBuffer;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+use crate::match_each_native_ptype;
+use crate::dtype::PType;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 use vortex_error::vortex_panic;
@@ -152,6 +154,21 @@ impl ArrayRef {
         let inner = self.inner_mut()?;
         let data = inner.data.as_any_mut().downcast_mut::<ArrayData<V>>()?;
         Some(&mut data.data)
+    }
+
+    /// Create a new array with the same dtype and `new_len` elements,
+    /// all set to the default value for the PType (0 for integers, 0.0 for floats, false for bool).
+    ///
+    /// Used for type-erased column extension in the Resize variant (spawn/despawn).
+    pub fn clone_empty(&self, new_len: usize) -> VortexResult<Self> {
+        let ptype = match self.dtype() {
+            DType::Primitive(pt, _) => *pt,
+            _ => return Err(vortex_error::vortex_err!("clone_empty: expected primitive dtype, got {:?}", self.dtype())),
+        };
+        Ok(match_each_native_ptype!(ptype, |T| {
+            let values: Vec<T> = vec![Default::default(); new_len];
+            crate::arrays::PrimitiveArray::from_iter(values).into_array()
+        }))
     }
 
     /// Returns the Arc::as_ptr().addr() of the underlying array.
