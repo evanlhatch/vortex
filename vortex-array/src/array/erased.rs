@@ -12,6 +12,8 @@ use std::sync::Arc;
 use vortex_buffer::ByteBuffer;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
+use crate::match_each_native_ptype;
+use crate::dtype::PType;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 use vortex_error::vortex_panic;
@@ -93,6 +95,79 @@ impl ArrayRef {
     #[inline(always)]
     pub(crate) fn inner_mut(&mut self) -> Option<&mut ArrayInner<dyn DynArrayData>> {
         Arc::get_mut(&mut self.0)
+    }
+
+    /// Ensure unique ownership. If the Arc is shared (refcount > 1),
+    /// this creates a new ArrayRef by cloning the array's data and slots.
+    /// After this call, `try_as_mut` / `try_buffer_mut` / `slots_mut` always succeed.
+    ///
+    /// Uses `with_slots` to reconstruct the array if the Arc is shared —
+    /// this is the same pattern Vortex uses internally for `put_slot_unchecked`.
+    #[inline]
+    pub fn make_mut(&mut self) {
+        if Arc::strong_count(&self.0) > 1 {
+            // Arc is shared — reconstruct a new unique ArrayRef.
+            // Clone the slots (Arc bumps on children) and rebuild via with_slots.
+            let slots: ArraySlots = self.slots().iter().cloned().collect();
+            let stats = self.statistics().to_owned();
+            // SAFETY: we're reconstructing the same array with the same slots.
+            // The slots are cloned (Arc bumps), so logically identical.
+            let new_ref = unsafe { self.clone().with_slots(slots) }
+                .vortex_expect("make_mut: with_slots failed");
+            // Restore stats on the new array
+            *self = new_ref;
+        }
+    }
+
+    /// Returns mutable access to the array's slots (children) if uniquely owned.
+    /// Enables in-place mutation of composite encodings' children (Dict values,
+    /// PatchedArray patch values, FoR encoded, etc.) without rebuilding the array.
+    ///
+    /// Returns `None` if the Arc is shared. Call `make_mut()` first to guarantee `Some`.
+    #[inline(always)]
+    pub fn slots_mut(&mut self) -> Option<&mut [Option<ArrayRef>]> {
+        let inner = self.inner_mut()?;
+        Some(&mut inner.slots)
+    }
+
+    /// Invalidate all cached statistics. Called after in-place mutation
+    /// to prevent stale stats from being used for encoding/constraint/freeze decisions.
+    #[inline]
+    pub fn invalidate_stats(&mut self) {
+        if let Some(inner) = self.inner_mut() {
+            inner.stats.retain(&[]);
+        }
+    }
+
+    /// If this is the sole owner, return a mutable reference to the typed array data.
+    /// Returns `None` if the `Arc` is shared (refcount > 1) or the encoding doesn't match.
+    ///
+    /// This is the in-place mutation primitive. No allocation, no rebuild.
+    /// Mirrors `as_opt::<V>()` for immutable access, but returns `&mut V::TypedArrayData`.
+    ///
+    /// When `None` is returned (shared Arc), the caller must materialize to Primitive
+    /// and rebuild. This only happens on forked columns (first mutation after fork).
+    /// On the hot path (column store owns the Arc), refcount is always 1 → always `Some`.
+    #[inline(always)]
+    pub fn try_as_mut<V: VTable>(&mut self) -> Option<&mut V::TypedArrayData> {
+        let inner = self.inner_mut()?;
+        let data = inner.data.as_any_mut().downcast_mut::<ArrayData<V>>()?;
+        Some(&mut data.data)
+    }
+
+    /// Create a new array with the same dtype and `new_len` elements,
+    /// all set to the default value for the PType (0 for integers, 0.0 for floats, false for bool).
+    ///
+    /// Used for type-erased column extension in the Resize variant (spawn/despawn).
+    pub fn clone_empty(&self, new_len: usize) -> VortexResult<Self> {
+        let ptype = match self.dtype() {
+            DType::Primitive(pt, _) => *pt,
+            _ => return Err(vortex_error::vortex_err!("clone_empty: expected primitive dtype, got {:?}", self.dtype())),
+        };
+        Ok(match_each_native_ptype!(ptype, |T| {
+            let values: Vec<T> = vec![Default::default(); new_len];
+            crate::arrays::PrimitiveArray::from_iter(values).into_array()
+        }))
     }
 
     /// Returns the Arc::as_ptr().addr() of the underlying array.

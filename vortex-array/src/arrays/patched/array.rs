@@ -7,6 +7,7 @@ use std::ops::Range;
 
 use vortex_buffer::Buffer;
 use vortex_buffer::BufferMut;
+use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
@@ -65,6 +66,29 @@ pub struct PatchedSlots {
     /// The patched (exception) values at the corresponding indices.
     #[slot(3)]
     pub patch_values: ArrayRef,
+}
+
+impl PatchedSlots {
+    /// Mutable access to the inner (base) array.
+    pub fn base_mut(&mut self) -> &mut ArrayRef {
+        &mut self.inner
+    }
+
+    /// Mutable access to the lane offsets array.
+    #[allow(dead_code)]
+    pub fn lane_offsets_mut(&mut self) -> &mut ArrayRef {
+        &mut self.lane_offsets
+    }
+
+    /// Mutable access to the patch indices array.
+    pub fn patch_indices_mut(&mut self) -> &mut ArrayRef {
+        &mut self.patch_indices
+    }
+
+    /// Mutable access to the patch values array.
+    pub fn patch_values_mut(&mut self) -> &mut ArrayRef {
+        &mut self.patch_values
+    }
 }
 
 impl Display for PatchedData {
@@ -253,6 +277,99 @@ impl Patched {
                     .with_slots(slots),
             )
         }
+    }
+
+    /// Construct a Patched array from a base + patches WITHOUT validation,
+    /// WITHOUT all_valid check, WITHOUT execute::<Canonical> traversal.
+    ///
+    /// This is the Flatland hot-path constructor. It assumes:
+    /// - `patches.indices()` and `patches.values()` are already `PrimitiveArray`
+    ///   (not lazy/virtual arrays that need `execute::<Canonical>`)
+    /// - The dtype, length, and nullability are correct
+    /// - There are no null values in the patches
+    ///
+    /// This skips the 4 `vortex_ensure!` checks and 2 `execute::<Canonical>`
+    /// traversals that `from_array_and_patches` performs, eliminating the need
+    /// for `ExecutionCtx` on the mutation hot path.
+    ///
+    /// # Safety (caller guarantees)
+    ///
+    /// * `patches.indices()` is a non-nullable unsigned integer `PrimitiveArray`
+    /// * `patches.values()` is a `PrimitiveArray` with dtype matching `base.dtype()`
+    /// * `patches.indices().len() == patches.values().len()`
+    /// * `patches.indices().len() <= u32::MAX`
+    /// * `base.dtype().is_primitive()`
+    pub fn from_parts_unchecked(
+        base: ArrayRef,
+        patches: &Patches,
+    ) -> Array<Patched> {
+        use crate::arrays::Primitive;
+
+        let indices_prim = patches
+            .indices()
+            .as_opt::<Primitive>()
+            .vortex_expect("from_parts_unchecked: indices must be Primitive");
+        let values_prim = patches
+            .values()
+            .as_opt::<Primitive>()
+            .vortex_expect("from_parts_unchecked: values must be Primitive");
+
+        let values_ptype = values_prim.ptype();
+
+        // Transpose directly from Primitive buffers — no executor, no ctx.
+        // We access the raw buffers and call the same `transpose` function
+        // that `transpose_patches` uses, but without going through
+        // `execute::<Canonical>` first (since we know they're already Primitive).
+        let indices_ptype = indices_prim.ptype();
+
+        let indices_buf = indices_prim.buffer_handle().clone().unwrap_host();
+        let values_buf = values_prim.buffer_handle().clone().unwrap_host();
+
+        let transposed = match_each_unsigned_integer_ptype!(indices_ptype, |I| {
+            match_each_native_ptype!(values_ptype, |V| {
+                let indices: Buffer<I> = Buffer::from_byte_buffer(indices_buf);
+                let values: Buffer<V> = Buffer::from_byte_buffer(values_buf);
+
+                transpose(
+                    indices.as_slice(),
+                    values.as_slice(),
+                    patches.offset(),
+                    patches.array_len(),
+                )
+            })
+        });
+
+        let lane_offsets = PrimitiveArray::from_buffer_handle(
+            BufferHandle::new_host(transposed.lane_offsets),
+            PType::U32,
+            Validity::NonNullable,
+        )
+        .into_array();
+        let indices = PrimitiveArray::from_buffer_handle(
+            BufferHandle::new_host(transposed.indices),
+            PType::U16,
+            Validity::NonNullable,
+        )
+        .into_array();
+        let values = PrimitiveArray::from_buffer_handle(
+            BufferHandle::new_host(transposed.values),
+            values_ptype,
+            Validity::NonNullable,
+        )
+        .into_array();
+
+        let dtype = base.dtype().clone();
+        let len = base.len();
+        let slots = PatchedSlots {
+            inner: base,
+            lane_offsets,
+            patch_indices: indices,
+            patch_values: values,
+        }
+        .into_slots();
+        // SAFETY: we've transposed the patches correctly (same logic as
+        // from_array_and_patches) and the caller guarantees the invariants.
+        unsafe { Self::new_unchecked(dtype, len, slots, transposed.n_lanes, 0) }
     }
 }
 

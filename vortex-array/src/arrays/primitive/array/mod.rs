@@ -660,6 +660,19 @@ impl PrimitiveData {
             }
         }
     }
+
+    /// Get a mutable buffer, calling `make_mut` if the buffer is shared.
+    /// Unlike `try_buffer_mut` (which returns `None` for shared buffers),
+    /// this always succeeds because it clones-if-shared internally.
+    pub fn buffer_mut<T: NativePType>(&mut self) -> VortexResult<BufferMutGuard<'_, T>> {
+        // try_buffer_mut handles shared buffers by returning None.
+        // With our Buffer::from(Vec<u8>) fix, newly created buffers have
+        // the promotable vtable where is_unique() works, so try_buffer_mut
+        // should succeed. If it doesn't, it's a genuine error.
+        self.try_buffer_mut::<T>().ok_or_else(|| {
+            vortex_err!("buffer_mut failed — buffer not mutable")
+        })
+    }
 }
 
 /// A guard that holds a `BufferMut<T>` extracted from a `PrimitiveData`.

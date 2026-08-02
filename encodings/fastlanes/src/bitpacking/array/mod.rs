@@ -270,6 +270,19 @@ impl BitPackedData {
         bitpack_encode(&parray, bit_width, None, ctx)
     }
 
+    /// Get the raw packed bytes for a specific block (1024 elements).
+    /// Each block is `128 * bit_width` bytes.
+    /// The cursor uses this with `BitPacking::unchecked_unpack` for random-access reads.
+    pub fn packed_block(&self, block_idx: usize) -> Option<&[u8]> {
+        let block_bytes = 128 * self.bit_width as usize;
+        let offset = block_idx * block_bytes;
+        let packed = self.packed().as_host();
+        let start = offset;
+        let end = start + block_bytes;
+        if end > packed.len() { return None; }
+        Some(&packed[start..end])
+    }
+
     /// Calculate the maximum value that **can** be contained by this array, given its bit-width.
     ///
     /// Note that this value need not actually be present in the array.

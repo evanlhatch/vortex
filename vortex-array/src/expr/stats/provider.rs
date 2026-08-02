@@ -5,6 +5,7 @@ use vortex_error::VortexError;
 use vortex_error::vortex_panic;
 
 use super::StatType;
+use crate::dtype::NativePType;
 use crate::expr::stats::Precision;
 use crate::expr::stats::Stat;
 use crate::scalar::Scalar;
@@ -50,5 +51,24 @@ pub trait StatsProviderExt: StatsProvider {
         U: for<'a> TryFrom<&'a Scalar, Error = VortexError>,
     {
         self.get_as::<U>(S::STAT).bound::<S>()
+    }
+
+    /// Whether the array is statistically constant (all elements equal).
+    /// Returns `None` if the stat is not available.
+    fn is_constant(&self) -> Option<bool> {
+        self.get(Stat::IsConstant).as_exact()
+            .and_then(|s| s.as_primitive().typed_value::<u8>().map(|v| v != 0))
+    }
+
+    /// The minimum value, typed. Returns `None` if the stat is not available or type mismatch.
+    fn min_value<T: NativePType>(&self) -> Option<T> {
+        self.get(Stat::Min).as_exact()
+            .and_then(|s| s.as_primitive().typed_value::<T>())
+    }
+
+    /// The maximum value, typed. Returns `None` if the stat is not available or type mismatch.
+    fn max_value<T: NativePType>(&self) -> Option<T> {
+        self.get(Stat::Max).as_exact()
+            .and_then(|s| s.as_primitive().typed_value::<T>())
     }
 }
