@@ -46,7 +46,7 @@ impl Display for FoRData {
 }
 
 impl FoRData {
-    pub(crate) fn try_new(reference: Scalar) -> VortexResult<Self> {
+    pub fn try_new(reference: Scalar) -> VortexResult<Self> {
         vortex_ensure!(!reference.is_null(), "Reference value cannot be null");
         vortex_ensure!(
             reference.dtype().is_int(),
