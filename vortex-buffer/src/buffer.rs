@@ -642,6 +642,18 @@ where
     fn from(mut value: Vec<T>) -> Self {
         let original_len = value.len();
 
+        // Empty vecs have a dangling pointer that may be misaligned for T;
+        // return a non-allocating aligned empty buffer instead of panicking.
+        if original_len == 0 {
+            return Self::empty();
+        }
+
+        // If the heap pointer is somehow misaligned for T, fall back to a copy
+        // into a properly aligned buffer.
+        if value.as_ptr().align_offset(align_of::<T>()) != 0 {
+            return BufferMut::from_iter(value).freeze();
+        }
+
         // Convert Vec<T> → Vec<u8> zero-copy (same heap allocation, reinterpret bytes).
         // This lets us use Bytes::from(Vec<u8>) which uses the promotable vtable,
         // where is_unique() returns true when ref_cnt == 1 — enabling zero-copy
@@ -883,6 +895,19 @@ mod test {
         let buff = Buffer::from(vec.clone());
         assert!(buff.is_aligned(Alignment::of::<i32>()));
         assert_eq!(vec, buff.as_ref());
+    }
+
+    #[test]
+    fn from_empty_vec() {
+        let buff = Buffer::from(Vec::<u32>::new());
+        assert_eq!(buff.len(), 0);
+        assert!(buff.is_aligned(Alignment::of::<u32>()));
+        assert_eq!(buff.as_slice(), &[] as &[u32]);
+
+        // Empty vec with capacity should also work.
+        let buff = Buffer::from(Vec::<u64>::with_capacity(16));
+        assert_eq!(buff.len(), 0);
+        assert_eq!(buff.as_slice(), &[] as &[u64]);
     }
 
     #[test]
