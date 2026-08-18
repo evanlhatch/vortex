@@ -70,6 +70,10 @@ pub mod interleave;
 pub use interleave::Interleave;
 pub use interleave::InterleaveArray;
 
+pub mod sort;
+pub use sort::Sort;
+pub use sort::SortArray;
+
 pub mod list;
 pub use list::List;
 pub use list::ListArray;
