@@ -155,10 +155,12 @@ impl ArrayRef {
         Some(&mut data.data)
     }
 
-    /// Create a new array with the same dtype and `new_len` elements,
-    /// all set to the default value for the PType (0 for integers, 0.0 for floats, false for bool).
-    ///
-    /// Used for type-erased column extension in the Resize variant (spawn/despawn).
+    /// Returns a new zero-filled array of `new_len` rows with the same dtype as
+    /// this array (0 for integers, 0.0 for floats, false for bool), discarding
+    /// this array's data entirely. This is not column extension — the existing
+    /// rows are not preserved. Callers needing base-plus-zero-fill extension
+    /// semantics must implement them themselves (flatland does so via its own
+    /// Chunked-concat extension).
     pub fn clone_empty(&self, new_len: usize) -> VortexResult<Self> {
         let ptype = match self.dtype() {
             DType::Primitive(pt, _) => *pt,

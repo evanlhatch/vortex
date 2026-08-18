@@ -36,6 +36,7 @@ use crate::dtype::Nullability::NonNullable;
 use crate::dtype::PType;
 use crate::dtype::UnsignedPType;
 use crate::legacy_session;
+use crate::match_each_native_ptype;
 use crate::match_each_unsigned_integer_ptype;
 use crate::scalar::Scalar;
 use crate::search_sorted::SearchResult;
@@ -328,6 +329,8 @@ impl Patches {
 
     /// Merge another Patches into this one. Sorted-index union, last-write-wins.
     /// Works on flat patches (no chunk_offsets). For chunked patches, returns None.
+    /// Both value arrays must share a primitive ptype — the value merge is
+    /// monomorphized over it; on a ptype mismatch, returns None.
     pub fn try_merge(&mut self, other: &Self) -> Option<()> {
         // Only supports flat patches (no chunk_offsets)
         if self.chunk_offsets.is_some() || other.chunk_offsets.is_some() {
@@ -339,49 +342,51 @@ impl Patches {
         let self_values = self.values.as_opt::<Primitive>()?;
         let other_values = other.values.as_opt::<Primitive>()?;
 
+        if self_values.ptype() != other_values.ptype() {
+            return None;
+        }
+
         let mut merged_indices = Vec::<u32>::with_capacity(self_indices.len() + other_indices.len());
-        let mut merged_values = Vec::<u32>::with_capacity(self_values.len() + other_values.len());
 
         let mut si = 0;
         let mut oi = 0;
         let sl = self_indices.as_slice::<u32>();
         let ol = other_indices.as_slice::<u32>();
-        let sv = self_values.as_slice::<u32>();
-        let ov = other_values.as_slice::<u32>();
 
-        while si < sl.len() && oi < ol.len() {
-            if sl[si] < ol[oi] {
-                merged_indices.push(sl[si]);
-                merged_values.push(sv[si]);
-                si += 1;
-            } else if sl[si] > ol[oi] {
-                merged_indices.push(ol[oi]);
-                merged_values.push(ov[oi]);
-                oi += 1;
-            } else {
-                // Same index — last-write-wins (other wins)
-                merged_indices.push(ol[oi]);
-                merged_values.push(ov[oi]);
-                si += 1;
-                oi += 1;
+        let (self_indices_array, self_values_array) = match_each_native_ptype!(self_values.ptype(), |T| {
+            let sv = self_values.as_slice::<T>();
+            let ov = other_values.as_slice::<T>();
+            let mut merged_values = Vec::<T>::with_capacity(sv.len() + ov.len());
+
+            while si < sl.len() && oi < ol.len() {
+                if sl[si] < ol[oi] {
+                    merged_indices.push(sl[si]);
+                    merged_values.push(sv[si]);
+                    si += 1;
+                } else if sl[si] > ol[oi] {
+                    merged_indices.push(ol[oi]);
+                    merged_values.push(ov[oi]);
+                    oi += 1;
+                } else {
+                    // Same index — last-write-wins (other wins)
+                    merged_indices.push(ol[oi]);
+                    merged_values.push(ov[oi]);
+                    si += 1;
+                    oi += 1;
+                }
             }
-        }
-        while si < sl.len() { merged_indices.push(sl[si]); merged_values.push(sv[si]); si += 1; }
-        while oi < ol.len() { merged_indices.push(ol[oi]); merged_values.push(ov[oi]); oi += 1; }
+            while si < sl.len() { merged_indices.push(sl[si]); merged_values.push(sv[si]); si += 1; }
+            while oi < ol.len() { merged_indices.push(ol[oi]); merged_values.push(ov[oi]); oi += 1; }
 
-        self.indices = PrimitiveArray::from_iter(merged_indices).into_array();
-        self.values = PrimitiveArray::from_iter(merged_values).into_array();
+            (
+                PrimitiveArray::from_iter(merged_indices).into_array(),
+                PrimitiveArray::from_iter(merged_values).into_array(),
+            )
+        });
+
+        self.indices = self_indices_array;
+        self.values = self_values_array;
         self.array_len = self.array_len.max(other.array_len);
-        Some(())
-    }
-
-    /// Replace the current values with `new_values` (for revert).
-    /// The new_values Patches must have the same array_len and indices.
-    pub fn revert_with(&mut self, new_values: &Self) -> Option<()> {
-        if self.array_len != new_values.array_len {
-            return None;
-        }
-        self.values = new_values.values.clone();
         Some(())
     }
 
@@ -1353,6 +1358,87 @@ mod test {
             PrimitiveArray::from_iter([100i32, 200]),
             &mut ctx
         );
+    }
+
+    #[test]
+    fn try_merge_u64_values_overlapping_last_write_wins() {
+        let mut a = Patches::new(
+            100,
+            0,
+            buffer![1u32, 5, 9].into_array(),
+            buffer![10u64, 50, 90].into_array(),
+            None,
+        )
+        .unwrap();
+        let b = Patches::new(
+            100,
+            0,
+            buffer![5u32, 7].into_array(),
+            buffer![500u64, 70].into_array(),
+            None,
+        )
+        .unwrap();
+
+        // Previously this panicked (u32-only values); now it merges.
+        assert!(a.try_merge(&b).is_some());
+
+        let mut ctx = array_session().create_execution_ctx();
+        let merged_indices = a.indices().clone().execute::<PrimitiveArray>(&mut ctx).unwrap();
+        let merged_values = a.values().clone().execute::<PrimitiveArray>(&mut ctx).unwrap();
+        assert_eq!(merged_indices.as_slice::<u32>(), &[1, 5, 7, 9]);
+        assert_eq!(merged_values.as_slice::<u64>(), &[10, 500, 70, 90]);
+    }
+
+    #[test]
+    fn try_merge_u64_values_disjoint() {
+        let mut a = Patches::new(
+            100,
+            0,
+            buffer![2u32, 8].into_array(),
+            buffer![20u64, 80].into_array(),
+            None,
+        )
+        .unwrap();
+        let b = Patches::new(
+            100,
+            0,
+            buffer![1u32, 3, 9].into_array(),
+            buffer![10u64, 30, 90].into_array(),
+            None,
+        )
+        .unwrap();
+
+        assert!(a.try_merge(&b).is_some());
+
+        let mut ctx = array_session().create_execution_ctx();
+        let merged_indices = a.indices().clone().execute::<PrimitiveArray>(&mut ctx).unwrap();
+        let merged_values = a.values().clone().execute::<PrimitiveArray>(&mut ctx).unwrap();
+        assert_eq!(merged_indices.as_slice::<u32>(), &[1, 2, 3, 8, 9]);
+        assert_eq!(merged_values.as_slice::<u64>(), &[10, 20, 30, 80, 90]);
+    }
+
+    #[test]
+    fn try_merge_ptype_mismatch_returns_none() {
+        let mut a = Patches::new(
+            100,
+            0,
+            buffer![1u32].into_array(),
+            buffer![10u32].into_array(),
+            None,
+        )
+        .unwrap();
+        let b = Patches::new(
+            100,
+            0,
+            buffer![2u32].into_array(),
+            buffer![20u64].into_array(),
+            None,
+        )
+        .unwrap();
+
+        assert!(a.try_merge(&b).is_none());
+        assert_eq!(a.indices().len(), 1);
+        assert_eq!(a.values().len(), 1);
     }
 
     #[test]
