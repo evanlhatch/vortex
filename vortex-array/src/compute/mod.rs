@@ -3,3 +3,5 @@
 
 #[cfg(feature = "_test-harness")]
 pub mod conformance;
+
+pub mod sort;
