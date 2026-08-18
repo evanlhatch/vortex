@@ -518,3 +518,58 @@ mod tests {
         Ok(())
     }
 }
+
+/// The sortedness of an array (flatland §3.3).
+///
+/// `StrictSorted` implies `Sorted`. Computed through the cached
+/// `Stat::IsSorted`/`Stat::IsStrictSorted` statistics — an exact cached value
+/// is O(1); otherwise the accumulator computes it once and the stat is cached
+/// for the next reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sortedness {
+    /// Ascending, no duplicates.
+    StrictSorted,
+    /// Ascending (duplicates allowed).
+    Sorted,
+    /// Known unsorted, or unsupported dtype (struct/list/FSL report Unsorted).
+    Unsorted,
+}
+
+/// Return the array's sortedness, preferring cached exact stats (O(1)) and
+/// computing+caching otherwise. This is the flatland SortKernel short-circuit:
+/// `Sorted | StrictSorted` ⇒ the identity permutation.
+pub fn sortedness(arr: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<Sortedness> {
+    use crate::aggregate_fn::fns::is_sorted::{is_sorted, is_strict_sorted};
+    if is_strict_sorted(arr, ctx)? {
+        return Ok(Sortedness::StrictSorted);
+    }
+    if is_sorted(arr, ctx)? {
+        return Ok(Sortedness::Sorted);
+    }
+    Ok(Sortedness::Unsorted)
+}
+
+#[cfg(test)]
+mod sortedness_tests {
+    use vortex_buffer::buffer;
+
+    use super::*;
+    use crate::IntoArray;
+    use crate::VortexSessionExecute;
+    use crate::array_session;
+    use crate::arrays::PrimitiveArray;
+
+    #[test]
+    fn sortedness_tri_state() -> VortexResult<()> {
+        let mut ctx = array_session().create_execution_ctx();
+        let strict = buffer![1u32, 2, 3].into_array();
+        let dupes = buffer![1u32, 2, 2].into_array();
+        let unsorted = buffer![3u32, 1, 2].into_array();
+        assert_eq!(sortedness(&strict, &mut ctx)?, Sortedness::StrictSorted);
+        assert_eq!(sortedness(&dupes, &mut ctx)?, Sortedness::Sorted);
+        assert_eq!(sortedness(&unsorted, &mut ctx)?, Sortedness::Unsorted);
+        // Second call hits the O(1) cached stat path.
+        assert_eq!(sortedness(&unsorted, &mut ctx)?, Sortedness::Unsorted);
+        Ok(())
+    }
+}
