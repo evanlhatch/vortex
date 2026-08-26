@@ -13,7 +13,6 @@ use vortex_buffer::ByteBuffer;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use crate::match_each_native_ptype;
-use crate::dtype::PType;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
 use vortex_error::vortex_panic;
@@ -109,9 +108,9 @@ impl ArrayRef {
             // Arc is shared — reconstruct a new unique ArrayRef.
             // Clone the slots (Arc bumps on children) and rebuild via with_slots.
             let slots: ArraySlots = self.slots().iter().cloned().collect();
-            let stats = self.statistics().to_owned();
             // SAFETY: we're reconstructing the same array with the same slots.
-            // The slots are cloned (Arc bumps), so logically identical.
+            // The slots are cloned (Arc bumps), so logically identical; with_slots
+            // preserves parent statistics.
             let new_ref = unsafe { self.clone().with_slots(slots) }
                 .vortex_expect("make_mut: with_slots failed");
             // Restore stats on the new array
