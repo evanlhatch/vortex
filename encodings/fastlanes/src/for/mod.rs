@@ -6,6 +6,7 @@ pub use array::FoRArrayExt;
 pub use array::FoRArraySlotsExt;
 pub use array::FoRData;
 pub use array::FoRSlots;
+pub use array::for_decompress::decompress;
 
 pub(crate) mod compute;
 

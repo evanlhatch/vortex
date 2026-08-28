@@ -46,6 +46,7 @@ mod r#for;
 mod rle;
 mod transposed_bool;
 pub mod flatland;
+pub use flatland::affine as affine;
 pub use flatland::raw_parts as raw_parts;
 
 pub const FL_CHUNK_SIZE: usize = 1024;
