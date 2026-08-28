@@ -56,6 +56,13 @@ pub fn diff(old: &ArrayRef, new: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexRes
         new.dtype()
     );
 
+    // Canonical fast path (REBUILD Part 3 #5 + #4): host-resident u32 columns
+    // diff directly through the SVE tiers — no compare array, no Mask, no
+    // take-encode round trips. Other dtypes fall through to the generic path.
+    if let Some(patches) = diff_fast_path(old, new) {
+        return Ok(patches);
+    }
+
     let changed = execute_compare(old, new, CompareOperator::NotEq, ctx)?;
     let mask = Mask::from_buffer(changed.execute::<BoolArray>(ctx)?.into_bit_buffer());
 
@@ -79,6 +86,52 @@ pub fn diff(old: &ArrayRef, new: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexRes
 
     let values = new.take(u32_array(&indices))?;
     unsafe { Ok(Patches::new_simple_unchecked(new.len(), 0, u32_array(&indices), values)) }
+}
+
+/// SVE fast path for [`diff`]: both operands host-resident Primitive u32.
+/// Equivalent to the generic path — `neq_lanes` (SVE compare) → index scan →
+/// SVE `gather` of `new`'s changed values. Returns `None` to fall through
+/// when the operands aren't canonical u32 primitives.
+fn diff_fast_path(old: &ArrayRef, new: &ArrayRef) -> Option<Patches> {
+    use crate::arrays::primitive::PrimitiveArrayExt as _;
+    use vortex_buffer::sve;
+    let old_view = old.as_opt::<Primitive>()?;
+    let new_view = new.as_opt::<Primitive>()?;
+    if old_view.ptype() != PType::U32 || new_view.ptype() != PType::U32 {
+        return None;
+    }
+    if old_view.buffer_handle().as_host_opt().is_none()
+        || new_view.buffer_handle().as_host_opt().is_none()
+    {
+        return None;
+    }
+
+    let old_slice = old_view.as_slice::<u32>();
+    let new_slice = new_view.as_slice::<u32>();
+    let n = new.len();
+
+    // SVE inequality lanes → changed indices.
+    let mut lanes = vec![0u32; n];
+    sve::neq_lanes_u32(old_slice, new_slice, &mut lanes);
+    let indices: Vec<u32> = lanes
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| **l != 0)
+        .map(|(i, _)| i as u32)
+        .collect();
+
+    // SVE gather of the changed values straight out of `new`.
+    let mut values = vec![0u32; indices.len()];
+    sve::gather_u32(new_slice, &indices, &mut values);
+
+    unsafe {
+        Some(Patches::new_simple_unchecked(
+            new.len(),
+            0,
+            u32_array(&indices),
+            u32_array(&values),
+        ))
+    }
 }
 
 /// Indexed write (REBUILD Part 3 #6): `result[indices[i]] = values[i]` for
@@ -139,7 +192,14 @@ pub fn scatter_in_place(
     }
     vortex_ensure!(ok_bounds, "scatter index out of bounds for len {}", len);
 
-    // Fast path: uniquely-owned buffer — in-place atomic writes.
+    // Fast path: uniquely-owned buffer — in-place writes. u32 target uses the
+    // SVE scatter tier; other ptypes use the scalar loop.
+    if ptype == PType::U32 {
+        if let Some(mut guard) = target.try_buffer_mut::<u32>() {
+            vortex_buffer::sve::scatter_u32(idx_slice, values_arr.as_slice::<u32>(), guard.as_mut_slice());
+            return Ok(());
+        }
+    }
     let mut written = false;
     match_each_native_ptype!(ptype, |T| {
         let vals = values_arr.as_slice::<T>();

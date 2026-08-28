@@ -5,4 +5,3 @@
 pub mod conformance;
 
 pub mod sort;
-pub mod verbs;

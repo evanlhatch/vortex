@@ -66,9 +66,10 @@ mod bytes;
 mod r#const;
 mod debug;
 mod dispatch;
-pub mod sve;
-pub mod delta;
-pub use delta::DeltaBuffer;
+pub mod flatland;
+pub use flatland::delta::DeltaBuffer;
+pub use flatland::sve as sve;
+pub use flatland::delta as delta;
 mod macros;
 #[cfg(feature = "memmap2")]
 mod memmap2;

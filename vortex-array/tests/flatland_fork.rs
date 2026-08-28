@@ -5,7 +5,7 @@
 
 use vortex_array::IntoArray;
 use vortex_array::arrays::PrimitiveArray;
-use vortex_array::compute::verbs;
+use vortex_array::flatland::verbs;
 use vortex_array::expr::stats::{Precision, Stat, StatsProvider};
 use vortex_array::patches::Patches;
 use vortex_array::scalar::{PValue, Scalar, ScalarValue};
@@ -318,4 +318,52 @@ fn raw_parts_bool_bits() {
     assert!(parts.bits.value(0));
     assert!(!parts.bits.value(1));
     assert!(parts.bits.value(3));
+}
+
+// ── Part 3 #5/#6 SVE fast paths ────────────────────────────────────────────
+
+#[test]
+fn diff_u32_sve_fast_path_matches_generic() {
+    let ctx = &mut vortex_array::legacy_session().create_execution_ctx();
+    // u32 arrays → canonical fast path (neq_lanes + gather).
+    let old = u32_array(&[1, 2, 3, 4, 5, 6]);
+    let new = u32_array(&[1, 9, 3, 4, 55, 6]);
+    let p = verbs::diff(&old, &new, ctx).vortex_expect("diff fast");
+    assert_eq!(p.num_patches(), 2);
+    let ctx2 = &mut vortex_array::legacy_session().create_execution_ctx();
+    let pgeneric = verbs::diff(&old, &new, ctx2).vortex_expect("diff generic");
+    assert_eq!(p.num_patches(), pgeneric.num_patches());
+
+    // Values should be new's changed values: 9 and 55.
+    let (idx, val) = patch_contents_u32(&p);
+    assert_eq!(idx, vec![1u32, 4]);
+    assert_eq!(val, vec![9u32, 55]);
+}
+
+#[test]
+fn scatter_u32_sve_writes() {
+    let ctx = &mut vortex_array::legacy_session().create_execution_ctx();
+    let mut target = u32_array(&[10, 20, 30, 40, 50]);
+    verbs::scatter_in_place(&mut target, &u32_array(&[1, 3]), &u32_array(&[99, 77]), ctx)
+        .vortex_expect("scatter u32");
+    let out = target.execute::<PrimitiveArray>(ctx).vortex_expect("exec");
+    assert_eq!(out.as_slice::<u32>(), &[10, 99, 30, 77, 50]);
+}
+
+fn patch_contents_u32(p: &Patches) -> (Vec<u32>, Vec<u32>) {
+    let ctx = &mut vortex_array::legacy_session().create_execution_ctx();
+    let indices = p
+        .indices()
+        .clone()
+        .execute::<PrimitiveArray>(ctx)
+        .vortex_expect("indices exec");
+    let values = p
+        .values()
+        .clone()
+        .execute::<PrimitiveArray>(ctx)
+        .vortex_expect("values exec");
+    (
+        indices.as_slice::<u32>().to_vec(),
+        values.as_slice::<u32>().to_vec(),
+    )
 }

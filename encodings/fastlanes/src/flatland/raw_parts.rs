@@ -21,7 +21,7 @@ use std::marker::PhantomData;
 
 use vortex_array::ArrayRef;
 use vortex_array::dtype::{DType, NativePType};
-use vortex_array::raw_parts::RawParts;
+use vortex_array::flatland::raw_parts::RawParts;
 use vortex_array::scalar::PValue;
 
 /// Physical view of a frame-of-reference column: the reference the encoded

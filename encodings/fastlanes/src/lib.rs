@@ -45,7 +45,8 @@ mod delta;
 mod r#for;
 mod rle;
 mod transposed_bool;
-pub mod raw_parts;
+pub mod flatland;
+pub use flatland::raw_parts as raw_parts;
 
 pub const FL_CHUNK_SIZE: usize = 1024;
 
