@@ -395,3 +395,120 @@ fn raw_parts_chunked_walks_chunks() {
         <vortex_array::arrays::Chunked as RawParts<u32>>::raw_parts(&chunked).is_none()
     );
 }
+
+// ── Part 12 #8: property tests (seeded PRNG — no new deps) ──────────────────
+
+/// Tiny xorshift-style LCG; deterministic across platforms, good enough for
+/// structural fuzzing (not crypto, not stat testing).
+struct Lcg(u64);
+impl Lcg {
+    fn new(seed: u64) -> Self {
+        Self(seed | 1)
+    }
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// Random sorted-unique index set over [0, len), expected size ~len/rate.
+fn random_indices(rng: &mut Lcg, len: usize, rate: u64) -> Vec<u32> {
+    let mut idx: Vec<u32> = (0..len as u32)
+        .filter(|_| rng.below(rate) == 0)
+        .collect();
+    idx.sort_unstable();
+    idx
+}
+
+fn values_for(rng: &mut Lcg, n: usize) -> Vec<i64> {
+    (0..n).map(|_| rng.next() as i32 as i64).collect()
+}
+
+#[test]
+fn prop_merge_in_place_matches_try_merge_random() {
+    let len = 512usize;
+    for seed in 0..64u64 {
+        let rng = &mut Lcg::new(seed);
+        // Duplicate density varies: other's indices overlap self's with
+        // probability ~1/overlap_denom (1 = heavy dups, 8 = sparse).
+        for overlap_denom in [1u64, 2, 4, 8] {
+            let self_idx = random_indices(rng, len, 16);
+            let other_idx = random_indices(rng, len, 32);
+            // Force overlap: resample a slice of other's rows from self's set.
+            let forced: Vec<u32> = self_idx
+                .iter()
+                .filter(|_| rng.below(overlap_denom) == 0)
+                .copied()
+                .collect();
+            let mut other_idx = other_idx;
+            other_idx.extend_from_slice(&forced);
+            other_idx.sort_unstable();
+            other_idx.dedup();
+
+            let self_val = values_for(rng, self_idx.len());
+            let other_val = values_for(rng, other_idx.len());
+
+            let mut a = patches(&self_idx, &self_val, len);
+            let mut b = patches(&self_idx, &self_val, len);
+            let o = patches(&other_idx, &other_val, len);
+
+            let via_inplace = a.merge_in_place(&o);
+            assert_eq!(
+                via_inplace.is_some(),
+                true,
+                "unique-owned buffers must merge in place (seed {seed}, denom {overlap_denom})"
+            );
+            assert_eq!(
+                patch_contents(&a),
+                patch_contents(&b),
+                "merge_in_place ≡ try_merge failed (seed {seed}, denom {overlap_denom})"
+            );
+            assert_eq!(a.array_len(), b.array_len());
+        }
+    }
+}
+
+#[test]
+fn prop_diff_fast_matches_scalar_reference() {
+    // The fast path (portable neq lanes + gather) must equal a plain scalar
+    // neq scan + take — the generic path's semantics on canonical u32.
+    let ctx = &mut vortex_array::legacy_session().create_execution_ctx();
+    let len = 1000usize;
+    for seed in 0..32u64 {
+        let rng = &mut Lcg::new(seed);
+        // Mix of near-identical (few diffs) and divergent (many diffs).
+        let divergence = 1 + (rng.below(20) as usize);
+        let old: Vec<u32> = (0..len as u32).map(|i| i.wrapping_mul(2654435761)).collect();
+        let new: Vec<u32> = old
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| if rng.below(divergence as u64) == 0 { v ^ (i as u32).wrapping_add(7) } else { v })
+            .collect();
+
+        let patches = verbs::diff(&u32_array(&old), &u32_array(&new), ctx).vortex_expect("diff");
+
+        // Scalar reference.
+        let indices: Vec<u32> = old
+            .iter()
+            .zip(&new)
+            .enumerate()
+            .filter(|(_, (o, n))| o != n)
+            .map(|(i, _)| i as u32)
+            .collect();
+        let values: Vec<u32> = indices.iter().map(|&i| new[i as usize]).collect();
+
+        assert_eq!(patches.array_len(), len);
+        let (got_idx, got_vals_raw) = patch_contents(&patches);
+        assert_eq!(got_idx, indices, "indices (seed {seed})");
+        // Values ride `new`'s array — re-execute to compare as i64 contents.
+        assert_eq!(got_vals_raw.len(), values.len());
+        let got_vals: Vec<u32> = got_vals_raw.iter().map(|&v| v as u32).collect();
+        assert_eq!(got_vals, values, "values (seed {seed})");
+    }
+}
