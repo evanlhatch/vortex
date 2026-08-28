@@ -67,6 +67,8 @@ mod r#const;
 mod debug;
 mod dispatch;
 pub mod sve;
+pub mod delta;
+pub use delta::DeltaBuffer;
 mod macros;
 #[cfg(feature = "memmap2")]
 mod memmap2;
