@@ -17,5 +17,6 @@
 //!   `crate::patches::Patches`).
 //! - `inherit_subset_stats` on slice/filter/take (`crate::ArrayRef`).
 
+pub mod prelude;
 pub mod raw_parts;
 pub mod verbs;

@@ -47,6 +47,33 @@ pub unsafe trait RawParts<T: NativePType>: VTable {
     fn raw_parts<'a>(array: &'a ArrayRef) -> Option<Self::Parts<'a>>;
 }
 
+/// Row-decode accessor: parts that can produce a typed value for row `i` in
+/// O(1) (no loop, no allocation). This is the cursor's per-row read — the
+/// engine never writes a per-encoding decode loop.
+pub trait DecodeRow<T> {
+    /// Typed value at row `i`. `None` when the part cannot decode `T` or the
+    /// row is out of range.
+    fn value(&self, i: usize) -> Option<T>;
+}
+
+impl<'a, T: NativePType> DecodeRow<T> for PrimitiveParts<'a, T> {
+    #[inline]
+    fn value(&self, i: usize) -> Option<T> {
+        self.values.get(i).copied()
+    }
+}
+
+impl<'a, T: NativePType> DecodeRow<T> for ConstantParts<'a> {
+    #[inline]
+    fn value(&self, i: usize) -> Option<T> {
+        if i >= self.len {
+            return None;
+        }
+        let pv = self.scalar.as_primitive_opt()?.pvalue()?;
+        pv.cast::<T>().ok()
+    }
+}
+
 /// Borrow the encoding-specific data for `V` with the array's lifetime.
 fn typed_data<'a, V: VTable>(array: &'a ArrayRef) -> Option<&'a V::TypedArrayData> {
     let dyn_data: &'a dyn DynArrayData = array.dyn_array();
