@@ -143,6 +143,13 @@ impl<T: TypedArrayRef<Bool>> BoolArrayExt for T {}
 
 /// Field accessors and non-consuming methods on the inner bool data.
 impl BoolData {
+    /// Borrow the packed bits as a view without cloning (flatland fork:
+    /// raw_parts read-side access; panics on non-host buffers).
+    #[inline]
+    pub fn bit_buffer_view(&self) -> BitBufferView<'_> {
+        BitBufferView::from_meta(self.bits.as_host().as_slice(), self.meta)
+    }
+
     /// Splits into owned parts
     #[inline]
     pub fn into_parts(self, len: usize) -> BoolDataParts {

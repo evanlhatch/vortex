@@ -115,6 +115,7 @@ pub mod builtins;
 mod canonical;
 mod columnar;
 pub mod compute;
+pub mod raw_parts;
 pub mod display;
 pub mod dtype;
 mod executor;

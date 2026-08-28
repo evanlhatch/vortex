@@ -265,3 +265,57 @@ fn make_utf8(values: &[&str]) -> vortex_array::ArrayRef {
     let arr = vortex_array::arrays::VarBinArray::from_strs(values.to_vec());
     arr.into_array()
 }
+
+// ── Part 3 #3: RawParts typed views ──────────────────────────────────────────
+
+#[test]
+fn raw_parts_primitive_borrows_typed_slice() {
+    use vortex_array::raw_parts::{RawParts, PrimitiveParts};
+    let arr = i64_array(&[1, 2, 3, 4]);
+    let parts: PrimitiveParts<i64> = <vortex_array::arrays::Primitive as RawParts<i64>>::raw_parts(&arr)
+        .vortex_expect("primitive parts");
+    assert_eq!(parts.values, &[1, 2, 3, 4]);
+    // Wrong ptype → None.
+    assert!(
+        <vortex_array::arrays::Primitive as RawParts<u32>>::raw_parts(&arr).is_none(),
+        "i64 array must not yield u32 parts"
+    );
+}
+
+#[test]
+fn raw_parts_constant_and_dict() {
+    use vortex_array::dtype::{DType, Nullability};
+    use vortex_array::expr::stats::Precision;
+    use vortex_array::raw_parts::{ConstantParts, DictParts, RawParts};
+
+    let c = vortex_array::arrays::ConstantArray::new(7i64, 5usize);
+    let c_arr = c.into_array();
+    let parts: ConstantParts = <vortex_array::arrays::Constant as RawParts<i64>>::raw_parts(&c_arr)
+        .vortex_expect("constant parts");
+    assert_eq!(parts.len, 5);
+    assert_eq!(parts.scalar.as_primitive().pvalue(), Some(PValue::I64(7)));
+
+    // Dict over primitive values.
+    let keys = i64_array(&[7, 9, 7, 9, 7]);
+    let ctx = &mut vortex_array::legacy_session().create_execution_ctx();
+    let dict = vortex_array::builders::dict::dict_encode(&keys, ctx).vortex_expect("dict");
+    let dict_arr = dict.into_array();
+    let parts: DictParts = <vortex_array::arrays::Dict as RawParts<i64>>::raw_parts(&dict_arr)
+        .vortex_expect("dict parts");
+    assert_eq!(parts.len, 5);
+    assert_eq!(parts.codes.len(), 5);
+    assert_eq!(parts.values.len(), 2); // two distinct values
+}
+
+#[test]
+fn raw_parts_bool_bits() {
+    use vortex_array::raw_parts::{BoolParts, RawParts};
+    let arr = vortex_array::arrays::BoolArray::from_iter([true, false, true, true])
+        .into_array();
+    let parts: BoolParts = <vortex_array::arrays::Bool as RawParts<u8>>::raw_parts(&arr)
+        .vortex_expect("bool parts");
+    assert_eq!(parts.bits.len(), 4);
+    assert!(parts.bits.value(0));
+    assert!(!parts.bits.value(1));
+    assert!(parts.bits.value(3));
+}
