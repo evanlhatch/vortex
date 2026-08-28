@@ -9,6 +9,9 @@
 //! + offset), completing the cursor surface with
 //! `vortex_array::flatland::raw_parts`. [`affine`] — encoded-domain affine
 //! transform `dst = v*factor + base` (REBUILD Part 0's 3 sound arms).
+//! [`unpack`] — runtime-width FastLanes-layout u32 unpack, SVE tier over the
+//! lane dimension (REBUILD Part 3 #8).
 
 pub mod affine;
 pub mod raw_parts;
+pub mod unpack;

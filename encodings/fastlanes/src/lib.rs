@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 #![expect(clippy::cast_possible_truncation)]
+// flatland: SVE tiers (stdarch, unstable) — same gate as vortex-buffer.
+#![cfg_attr(target_arch = "aarch64", feature(stdarch_aarch64_sve))]
 
 //! FastLanes integer encodings for Vortex arrays.
 //!
