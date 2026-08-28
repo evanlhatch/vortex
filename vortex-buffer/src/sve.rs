@@ -27,11 +27,12 @@ pub fn gather_u32(src: &[u32], keys: &[u32], out: &mut [u32]) {
         #[cfg(target_arch = "aarch64")]
         {
             if std::arch::is_aarch64_feature_detected!("sve") {
-                return unsafe { gather_u32_sve };
+                return gather_u32_sve;
             }
-            return unsafe { gather_u32_neon };
+            return gather_u32_neon;
         }
         // Portable tail (x86 etc.): the unsafe fn pointer accepts a safe fn.
+        #[allow(unreachable_code)]
         gather_u32_scalar
     });
     // SAFETY: the selector probed the required feature for the chosen tier;
@@ -45,10 +46,11 @@ pub fn scatter_u32(keys: &[u32], vals: &[u32], out: &mut [u32]) {
         #[cfg(target_arch = "aarch64")]
         {
             if std::arch::is_aarch64_feature_detected!("sve") {
-                return unsafe { scatter_u32_sve };
+                return scatter_u32_sve;
             }
-            return unsafe { scatter_u32_neon };
+            return scatter_u32_neon;
         }
+        #[allow(unreachable_code)]
         scatter_u32_scalar
     });
     // SAFETY: selector probed features; every tier writes `out[keys[i]] = vals[i]`.
@@ -63,10 +65,11 @@ pub fn neq_lanes_u32(a: &[u32], b: &[u32], out: &mut [u32]) {
         #[cfg(target_arch = "aarch64")]
         {
             if std::arch::is_aarch64_feature_detected!("sve") {
-                return unsafe { neq_lanes_u32_sve };
+                return neq_lanes_u32_sve;
             }
-            return unsafe { neq_lanes_u32_neon };
+            return neq_lanes_u32_neon;
         }
+        #[allow(unreachable_code)]
         neq_lanes_u32_scalar
     });
     // SAFETY: selector probed features; all tiers write 0/1 lanes.
@@ -79,10 +82,11 @@ pub fn add_const_u32(a: &[u32], c: u32, out: &mut [u32]) {
         #[cfg(target_arch = "aarch64")]
         {
             if std::arch::is_aarch64_feature_detected!("sve") {
-                return unsafe { add_const_u32_sve };
+                return add_const_u32_sve;
             }
-            return unsafe { add_const_u32_neon };
+            return add_const_u32_neon;
         }
+        #[allow(unreachable_code)]
         add_const_u32_scalar
     });
     // SAFETY: selector probed features; all tiers compute wrapping a+c.
@@ -186,25 +190,25 @@ unsafe fn add_const_u32_sve(a: &[u32], c: u32, out: &mut [u32]) {
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn gather_u32_neon(src: &[u32], keys: &[u32], out: &mut [u32]) {
-    unsafe { gather_u32_scalar(src, keys, out) }
+    gather_u32_scalar(src, keys, out)
 }
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn scatter_u32_neon(keys: &[u32], vals: &[u32], out: &mut [u32]) {
-    unsafe { scatter_u32_scalar(keys, vals, out) }
+    scatter_u32_scalar(keys, vals, out)
 }
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn neq_lanes_u32_neon(a: &[u32], b: &[u32], out: &mut [u32]) {
-    unsafe { neq_lanes_u32_scalar(a, b, out) }
+    neq_lanes_u32_scalar(a, b, out)
 }
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn add_const_u32_neon(a: &[u32], c: u32, out: &mut [u32]) {
-    unsafe { add_const_u32_scalar(a, c, out) }
+    add_const_u32_scalar(a, c, out)
 }
 
 // =============================================================================

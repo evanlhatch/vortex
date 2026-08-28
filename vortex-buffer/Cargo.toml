@@ -57,3 +57,7 @@ harness = false
 [[bench]]
 name = "collect_bool"
 harness = false
+
+[[bench]]
+name = "sve"
+harness = false

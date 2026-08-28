@@ -68,8 +68,10 @@ impl ArrayStats {
     }
 
     /// Clear exactly the stats invalidated by an in-place mutation of the
-    /// array's value bytes (flatland REBUILD Part 3 #1). Validity-derived
-    /// stats (NullCount) and size stats are unaffected by value writes.
+    /// array's value bytes (flatland REBUILD Part 3 #1: guard carries the
+    /// stats; Drop clears {Min, Max, Sum, IsConstant, IsSorted, IsStrictSorted,
+    /// NaNCount}). Validity-derived stats (NullCount) and size stats are
+    /// unaffected by value writes.
     pub fn clear_value_stats(&self) {
         let mut w = self.inner.write();
         for stat in [
@@ -79,6 +81,7 @@ impl ArrayStats {
             Stat::Min,
             Stat::Max,
             Stat::Sum,
+            Stat::NaNCount,
         ] {
             w.clear(stat);
         }
