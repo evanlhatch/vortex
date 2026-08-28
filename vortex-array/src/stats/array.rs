@@ -66,6 +66,23 @@ impl ArrayStats {
     pub fn retain(&self, stats: &[Stat]) {
         self.inner.write().retain_only(stats);
     }
+
+    /// Clear exactly the stats invalidated by an in-place mutation of the
+    /// array's value bytes (flatland REBUILD Part 3 #1). Validity-derived
+    /// stats (NullCount) and size stats are unaffected by value writes.
+    pub fn clear_value_stats(&self) {
+        let mut w = self.inner.write();
+        for stat in [
+            Stat::IsConstant,
+            Stat::IsSorted,
+            Stat::IsStrictSorted,
+            Stat::Min,
+            Stat::Max,
+            Stat::Sum,
+        ] {
+            w.clear(stat);
+        }
+    }
 }
 
 impl From<StatsSet> for ArrayStats {

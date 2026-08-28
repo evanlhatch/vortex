@@ -39,6 +39,7 @@ use crate::arrays::Constant;
 use crate::arrays::DictArray;
 use crate::arrays::FilterArray;
 use crate::arrays::SliceArray;
+use crate::arrays::primitive::BufferMutGuard;
 use crate::buffer::BufferHandle;
 use crate::builders::ArrayBuilder;
 use crate::dtype::DType;
@@ -94,6 +95,20 @@ impl ArrayRef {
     #[inline(always)]
     pub(crate) fn inner_mut(&mut self) -> Option<&mut ArrayInner<dyn DynArrayData>> {
         Arc::get_mut(&mut self.0)
+    }
+
+    /// Overwrite the logical length in place (flatland fork: companion to
+    /// [`Self::try_buffer_mut`] for length-changing in-place rewrites).
+    ///
+    /// # Safety
+    /// Caller must ensure the encoding data logically holds exactly `len`
+    /// valid rows of the existing dtype.
+    #[inline]
+    pub(crate) unsafe fn set_len(&mut self, len: usize) {
+        let inner = self
+            .inner_mut()
+            .vortex_expect("set_len requires unique Arc ownership");
+        inner.len = len;
     }
 
     /// Ensure unique ownership. If the Arc is shared (refcount > 1),
@@ -152,6 +167,26 @@ impl ArrayRef {
         let inner = self.inner_mut()?;
         let data = inner.data.as_any_mut().downcast_mut::<ArrayData<V>>()?;
         Some(&mut data.data)
+    }
+
+    /// Mutable access to this array's primitive value buffer, with automatic
+    /// stats invalidation on drop (flatland REBUILD Part 3 #1: the guard
+    /// clears {IsConstant, IsSorted, IsStrictSorted, Min, Max, Sum} so stale
+    /// cached stats cannot outlive a mutation).
+    ///
+    /// Returns `None` when the Arc is shared (caller should make_mut first)
+    /// or when the encoding is not Primitive.
+    #[inline]
+    pub fn try_buffer_mut<T: crate::dtype::NativePType>(
+        &mut self,
+    ) -> Option<BufferMutGuard<'_, T>> {
+        let inner = self.inner_mut()?;
+        // Split-borrow: guard holds disjoint borrows of data and stats.
+        let ArrayInner { stats, data, .. } = inner;
+        let pd = data.as_any_mut().downcast_mut::<ArrayData<crate::arrays::Primitive>>()?;
+        let mut guard = pd.data.try_buffer_mut::<T>()?;
+        guard.stats = Some(&*stats);
+        Some(guard)
     }
 
     /// Returns a new zero-filled array of `new_len` rows with the same dtype as
@@ -303,36 +338,48 @@ impl ArrayRef {
             .into_array()
             .optimize()?;
 
-        // Propagate some stats from the original array to the sliced array.
-        if !sliced.is::<Constant>() {
-            self.statistics().with_iter(|iter| {
-                sliced.statistics().inherit(iter.filter(|(stat, value)| {
-                    matches!(
-                        stat,
-                        Stat::IsConstant | Stat::IsSorted | Stat::IsStrictSorted
-                    ) && value
-                        .as_ref()
-                        .as_exact()
-                        .is_some_and(|v| matches!(v, ScalarValue::Bool(true)))
-                }));
-            });
-        }
+        // Propagate subset-safe stats from the original array to the sliced array.
+        self.inherit_subset_stats(&sliced);
 
         Ok(sliced)
     }
 
+    /// Inherit exact, subset-safe value-domain stats from `self` onto `result`
+    /// (flatland REBUILD Part 3 #8). Sortedness/constancy carry only when exact;
+    /// Min/Max bounds are sound at any precision (a subset's domain lies within
+    /// its superset's). Row-count-dependent stats (Sum, NullCount, NaNCount,
+    /// UncompressedSizeInBytes) are deliberately excluded.
+    pub(crate) fn inherit_subset_stats(&self, result: &ArrayRef) {
+        if result.is::<Constant>() {
+            return;
+        }
+        self.statistics().with_iter(|iter| {
+            result.statistics().inherit(iter.filter(|(stat, value)| match stat {
+                Stat::IsConstant | Stat::IsSorted | Stat::IsStrictSorted => {
+                    value.as_ref().as_exact().is_some_and(|v| matches!(v, ScalarValue::Bool(true)))
+                }
+                Stat::Min | Stat::Max => true,
+                _ => false,
+            }));
+        });
+    }
+
     /// Wraps the array in a [`FilterArray`] such that it is logically filtered by the given mask.
     pub fn filter(&self, mask: Mask) -> VortexResult<ArrayRef> {
-        FilterArray::try_new(self.clone(), mask)?
+        let filtered = FilterArray::try_new(self.clone(), mask)?
             .into_array()
-            .optimize()
+            .optimize()?;
+        self.inherit_subset_stats(&filtered);
+        Ok(filtered)
     }
 
     /// Wraps the array in a [`DictArray`] such that it is logically taken by the given indices.
     pub fn take(&self, indices: ArrayRef) -> VortexResult<ArrayRef> {
-        DictArray::try_new(indices, self.clone())?
+        let taken = DictArray::try_new(indices, self.clone())?
             .into_array()
-            .optimize()
+            .optimize()?;
+        self.inherit_subset_stats(&taken);
+        Ok(taken)
     }
 
     /// Fetch the scalar at the given index.

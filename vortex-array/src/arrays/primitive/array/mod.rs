@@ -625,9 +625,6 @@ impl PrimitiveData {
         buffer.try_into_mut()
     }
 
-    /// Non-consuming mutable buffer access. Works on `&mut self` instead of consuming.
-    /// Returns `None` if the buffer is shared (refcount > 1).
-    ///
     /// Non-consuming mutable buffer access. Works on `&mut self`.
     /// Returns `None` if the buffer is shared (refcount > 1).
     ///
@@ -649,10 +646,7 @@ impl PrimitiveData {
         let byte_buffer = std::mem::take(self.buffer.as_host_mut());
         let buffer = Buffer::<T>::from_byte_buffer(byte_buffer);
         match buffer.try_into_mut() {
-            Ok(buf_mut) => Some(BufferMutGuard {
-                buf_mut,
-                slot: self.buffer.as_host_mut(),
-            }),
+            Ok(buf_mut) => Some(BufferMutGuard { buf_mut, slot: self.buffer.as_host_mut(), stats: None }),
             Err(original_buffer) => {
                 // Can't get mutable access — restore the original buffer
                 *self.buffer.as_host_mut() = original_buffer.into_byte_buffer();
@@ -676,11 +670,14 @@ impl PrimitiveData {
 }
 
 /// A guard that holds a `BufferMut<T>` extracted from a `PrimitiveData`.
-/// On drop, freezes the `BufferMut` back into the `PrimitiveData`'s `ByteBuffer` slot.
-/// This enables zero-alloc in-place mutation: the buffer is taken out, mutated, and put back.
+/// On drop, freezes the `BufferMut` back into the `PrimitiveData`'s `ByteBuffer` slot
+/// and clears the mutation-sensitive cached stats (`clear_value_stats`) when the
+/// guard was constructed with stats access (flatland REBUILD Part 3 #1: stale
+/// stats after in-place mutation are structurally impossible).
 pub struct BufferMutGuard<'a, T: NativePType> {
     buf_mut: BufferMut<T>,
     slot: &'a mut ByteBuffer,
+    pub(crate) stats: Option<&'a crate::stats::ArrayStats>,
 }
 
 impl<T: NativePType> Drop for BufferMutGuard<'_, T> {
@@ -689,6 +686,9 @@ impl<T: NativePType> Drop for BufferMutGuard<'_, T> {
         let buf_mut = std::mem::take(&mut self.buf_mut);
         let byte_buffer = buf_mut.freeze().into_byte_buffer();
         *self.slot = byte_buffer;
+        if let Some(stats) = self.stats {
+            stats.clear_value_stats();
+        }
     }
 }
 

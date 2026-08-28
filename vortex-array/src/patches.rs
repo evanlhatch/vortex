@@ -390,6 +390,111 @@ impl Patches {
         Some(())
     }
 
+    /// In-place merge: identical semantics to [`Self::try_merge`] (sorted-index
+    /// union, last-write-wins, flat patches only) but reuses self's index and
+    /// value buffers when uniquely owned — zero allocation on the flatland
+    /// overlay hot path (REBUILD Part 3 #2).
+    ///
+    /// Returns `None` (caller falls back to [`try_merge`]) when either buffer
+    /// is shared, indices are not u32, or value ptypes differ.
+    ///
+    /// SAFETY: backward merge writes position `w` only after consuming inputs
+    /// ahead of it (`w > i && w > j` invariant), so unread source bytes are
+    /// never clobbered; `set_len` runs after the full merged output is written
+    /// into reserved capacity.
+    pub fn merge_in_place(&mut self, other: &Self) -> Option<()> {
+        use crate::arrays::Primitive;
+        if self.chunk_offsets.is_some() || other.chunk_offsets.is_some() {
+            return None;
+        }
+        let other_indices = other.indices.as_opt::<Primitive>()?;
+        let other_values = other.values.as_opt::<Primitive>()?;
+        if other_indices.ptype() != PType::U32
+            || self.indices.as_opt::<Primitive>()?.ptype() != PType::U32
+            || self.values.as_opt::<Primitive>()?.ptype() != other_values.ptype()
+        {
+            return None;
+        }
+        let ol: &[u32] = other_indices.as_slice::<u32>();
+        let m = ol.len();
+        let merged_len = {
+            let mut idx_guard = self.indices.try_buffer_mut::<u32>()?;
+            idx_guard.reserve(m);
+
+        let (total, dups) = match_each_native_ptype!(other_values.ptype(), |T| {
+            let ov: &[T] = other_values.as_slice::<T>();
+            let mut val_guard = self.values.try_buffer_mut::<T>()?;
+            val_guard.reserve(m);
+
+            let n = idx_guard.len();
+            let total = n + m;
+            unsafe {
+                // SAFETY: slices cover exactly the initialized prefix; raw
+                // pointers stay valid (reserve happened before, no realloc after).
+                let slp = std::slice::from_raw_parts(idx_guard.as_ptr(), n);
+                let svp = std::slice::from_raw_parts(val_guard.as_ptr(), n);
+                let ip = idx_guard.as_mut_ptr();
+                let vp = val_guard.as_mut_ptr();
+                // Invariant: w > i && w > j — writes never clobber unread inputs.
+                let (mut i, mut j, mut w) = (n, m, total);
+                while i > 0 && j > 0 {
+                    w -= 1;
+                    match slp[i - 1].cmp(&ol[j - 1]) {
+                        Ordering::Equal => {
+                            // Last-write-wins: drop self's row, take other's.
+                            i -= 1;
+                            j -= 1;
+                            *ip.add(w) = ol[j];
+                            *vp.add(w) = ov[j];
+                        }
+                        Ordering::Greater => {
+                            i -= 1;
+                            *ip.add(w) = slp[i];
+                            *vp.add(w) = svp[i];
+                        }
+                        Ordering::Less => {
+                            j -= 1;
+                            *ip.add(w) = ol[j];
+                            *vp.add(w) = ov[j];
+                        }
+                    }
+                }
+                if j == 0 {
+                    // Remaining self prefix: overlapping block-copy behind cursor
+                    // (dst < src, so forward copy is correct).
+                    std::ptr::copy(ip, ip.add(w - i), i);
+                    std::ptr::copy(vp, vp.add(w - i), i);
+                    w -= i;
+                } else {
+                    std::ptr::copy_nonoverlapping(ol.as_ptr(), ip.add(w - j), j);
+                    std::ptr::copy_nonoverlapping(ov.as_ptr(), vp.add(w - j), j);
+                    w -= j;
+                }
+                debug_assert!(w <= n); // w == number of collapsed duplicates
+                if w > 0 {
+                    // Compact: shift merged region down over the duplicate holes.
+                    std::ptr::copy(ip.add(w), ip, total - w);
+                    std::ptr::copy(vp.add(w), vp, total - w);
+                }
+                idx_guard.set_len(total - w);
+                val_guard.set_len(total - w);
+                (total, w)
+            }
+        });
+            total - dups
+        };
+
+        // Guards dropped (buffers frozen back into place) — sync outer lengths.
+        // SAFETY: encoding data was rewritten above to hold exactly merged_len rows.
+        unsafe {
+            self.indices.set_len(merged_len);
+            self.values.set_len(merged_len);
+        }
+
+        self.array_len = self.array_len.max(other.array_len);
+        Some(())
+    }
+
     /// Construct new patches without validation, for the simple case of
     /// single-chunk patches (no chunk_offsets, no offset_within_chunk).
     ///

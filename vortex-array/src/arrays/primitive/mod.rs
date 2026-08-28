@@ -4,6 +4,7 @@
 mod array;
 pub use array::PrimitiveArrayExt;
 pub use array::PrimitiveArraySlotsExt;
+pub use array::BufferMutGuard;
 pub use array::PrimitiveData;
 pub use array::PrimitiveDataParts;
 pub use array::PrimitiveSlots;
