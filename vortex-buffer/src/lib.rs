@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 #![deny(missing_docs)]
+#![cfg_attr(target_arch = "aarch64", feature(stdarch_aarch64_sve))]
+#![allow(clippy::too_many_arguments)]
 
 //! A library for working with custom aligned buffers of sized values.
 //!
@@ -64,6 +66,7 @@ mod bytes;
 mod r#const;
 mod debug;
 mod dispatch;
+pub mod sve;
 mod macros;
 #[cfg(feature = "memmap2")]
 mod memmap2;
