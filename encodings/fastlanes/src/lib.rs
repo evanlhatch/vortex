@@ -45,6 +45,7 @@ mod delta;
 mod r#for;
 mod rle;
 mod transposed_bool;
+pub mod raw_parts;
 
 pub const FL_CHUNK_SIZE: usize = 1024;
 
