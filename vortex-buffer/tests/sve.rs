@@ -132,3 +132,24 @@ fn compact_count_matches() {
     assert_eq!(sve::compact_count_u32(&[0u32; 33]), 0);
     assert_eq!(sve::compact_count_u32(&[1u32; 64]), 64);
 }
+
+#[test]
+fn portable_tiers_match_scalar() {
+    for n in [1usize, 7, 8, 9, 33] {
+        let a: Vec<u32> = (0..n as u32).map(|i| i.wrapping_mul(2654435761)).collect();
+        let b: Vec<u32> = (0..n as u32).map(|i| i.wrapping_add(3)).collect();
+        let mut out = vec![0u32; n];
+        vortex_buffer::portable::neq_lanes_u32(&a, &b, &mut out);
+        assert_eq!(out, a.iter().zip(&b).map(|(x,y)| if x!=y {1} else {0}).collect::<Vec<_>>());
+        vortex_buffer::portable::and_u32(&a, &b, &mut out);
+        assert_eq!(out, a.iter().zip(&b).map(|(x,y)| x&y).collect::<Vec<_>>());
+        vortex_buffer::portable::or_u32(&a, &b, &mut out);
+        assert_eq!(out, a.iter().zip(&b).map(|(x,y)| x|y).collect::<Vec<_>>());
+        vortex_buffer::portable::xor_u32(&a, &b, &mut out);
+        assert_eq!(out, a.iter().zip(&b).map(|(x,y)| x^y).collect::<Vec<_>>());
+        vortex_buffer::portable::not_u32(&a, &mut out);
+        assert_eq!(out, a.iter().map(|&x| !x).collect::<Vec<_>>());
+        vortex_buffer::portable::add_const_u32(&a, 7, &mut out);
+        assert_eq!(out, a.iter().map(|&x| x.wrapping_add(7)).collect::<Vec<_>>());
+    }
+}

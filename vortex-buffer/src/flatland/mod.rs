@@ -14,4 +14,5 @@
 //!   branchless blend (Part 17.1).
 
 pub mod delta;
+pub mod portable;
 pub mod sve;

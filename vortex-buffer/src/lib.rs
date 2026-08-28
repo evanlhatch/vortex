@@ -3,6 +3,7 @@
 
 #![deny(missing_docs)]
 #![cfg_attr(target_arch = "aarch64", feature(stdarch_aarch64_sve))]
+#![feature(portable_simd)]
 #![allow(clippy::too_many_arguments)]
 
 //! A library for working with custom aligned buffers of sized values.
@@ -68,6 +69,7 @@ mod debug;
 mod dispatch;
 pub mod flatland;
 pub use flatland::delta::DeltaBuffer;
+pub use flatland::portable as portable;
 pub use flatland::sve as sve;
 pub use flatland::delta as delta;
 mod macros;
