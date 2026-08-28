@@ -89,10 +89,14 @@ pub fn diff(old: &ArrayRef, new: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexRes
 }
 
 /// SVE fast path for [`diff`]: both operands host-resident Primitive u32.
-/// Equivalent to the generic path — `neq_lanes` (SVE compare) → index scan →
-/// SVE `gather` of `new`'s changed values. Returns `None` to fall through
-/// when the operands aren't canonical u32 primitives.
-fn diff_fast_path(old: &ArrayRef, new: &ArrayRef) -> Option<Patches> {
+/// Equivalent to the generic path — `neq_lanes` (portable-tier compare) →
+/// index scan → `gather` of `new`'s changed values. Returns `None` to fall
+/// through when the operands aren't canonical u32 primitives.
+///
+/// `pub`: the fastlanes flatland module reuses this for same-reference FoR
+/// pairs (encoded children, refs equal ⟺ values comparable — see
+/// `vortex_fastlanes::flatland::diff_encoded`).
+pub fn diff_fast_path(old: &ArrayRef, new: &ArrayRef) -> Option<Patches> {
     use crate::arrays::primitive::PrimitiveArrayExt as _;
     use vortex_buffer::sve;
     let old_view = old.as_opt::<Primitive>()?;

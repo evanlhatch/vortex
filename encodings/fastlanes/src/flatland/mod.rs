@@ -13,5 +13,6 @@
 //! lane dimension (REBUILD Part 3 #8).
 
 pub mod affine;
+pub mod diff;
 pub mod raw_parts;
 pub mod unpack;
