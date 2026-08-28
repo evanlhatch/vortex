@@ -350,7 +350,9 @@ pub fn compact_count_u32(keep: &[u32]) -> usize {
     static KERNEL: CpuKernel<unsafe fn(&[u32]) -> usize> = CpuKernel::new(|| {
         #[cfg(target_arch = "aarch64")]
         {
-            if std::arch::is_aarch64_feature_detected!("sve") {
+            // COMPACT is an SVE2 instruction; probing only SVE would SIGILL
+            // on SVE-without-SVE2 cores (e.g. A64FX). Fall back below.
+            if std::arch::is_aarch64_feature_detected!("sve2") {
                 return compact_count_u32_sve;
             }
             return compact_count_u32_neon;
@@ -367,7 +369,7 @@ fn compact_into(src: &[u32], keep: &[u32], out: &mut Vec<u32>) -> usize {
         CpuKernel::new(|| {
             #[cfg(target_arch = "aarch64")]
             {
-                if std::arch::is_aarch64_feature_detected!("sve") {
+                if std::arch::is_aarch64_feature_detected!("sve2") {
                     return compact_into_u32_sve;
                 }
                 return compact_into_u32_neon;
@@ -445,7 +447,7 @@ unsafe fn not_u32_sve(a: &[u32], out: &mut [u32]) {
 }
 
 #[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "sve")]
+#[target_feature(enable = "sve2")]
 unsafe fn compact_count_u32_sve(keep: &[u32]) -> usize {
     use std::arch::aarch64::{
         svcmpeq_u32, svcntp_b32, svcntw, svdup_n_u32, svld1_u32, svnot_b_z, svwhilelt_b32_u32,
@@ -464,7 +466,7 @@ unsafe fn compact_count_u32_sve(keep: &[u32]) -> usize {
 }
 
 #[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "sve")]
+#[target_feature(enable = "sve2")]
 unsafe fn compact_into_u32_sve(src: &[u32], keep: &[u32], out: *mut u32, cap: usize) -> usize {
     use std::arch::aarch64::{
         svcmpeq_u32, svcntp_b32, svcntw, svcompact_s32, svdup_n_u32, svld1_u32, svnot_b_z,

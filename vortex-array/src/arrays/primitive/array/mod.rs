@@ -700,3 +700,21 @@ impl<T: NativePType> std::ops::Deref for BufferMutGuard<'_, T> {
 impl<T: NativePType> std::ops::DerefMut for BufferMutGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target { &mut self.buf_mut }
 }
+
+impl<T: NativePType> BufferMutGuard<'_, T> {
+    /// Consume the guard and return the frozen [`Buffer<T>`], leaving the
+    /// array's buffer slot empty (flatland REBUILD Part XIV builtin; the
+    /// caller owns the new buffer and must rebuild/replace the array).
+    ///
+    /// Zero-copy dense delta construction: the mutated buffer moves into the
+    /// delta without a `slice.to_vec()` copy or an `Arc::clone`.
+    #[allow(clippy::should_implement_trait)]
+    pub fn take_buffer(mut self) -> Buffer<T> {
+        let mut me = std::mem::ManuallyDrop::new(self);
+        // Write a default ByteBuffer to the slot (replaces the real one);
+        // ManuallyDrop prevents the guard's Drop from freezing it back.
+        *me.slot = ByteBuffer::default();
+        let buf_mut = std::mem::take(&mut me.buf_mut);
+        buf_mut.freeze()
+    }
+}

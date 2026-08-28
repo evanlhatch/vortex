@@ -26,6 +26,7 @@ use crate::arrays::Bool;
 use crate::arrays::Constant;
 use crate::arrays::Dict;
 use crate::arrays::dict::DictSlots;
+use crate::arrays::chunked::ChunkedSlots;
 use crate::arrays::Primitive;
 use crate::dtype::DType;
 use crate::dtype::NativePType;
@@ -162,4 +163,41 @@ impl<T: NativePType> NativeDType for T {
 
 pub(crate) trait NativeDType {
     fn dtype_of() -> DType;
+}
+
+/// Physical view of a chunked column: the chunk list the cursor walks
+/// (REBUILD Part 13: spawn = Chunked lazy append, the read cursor walks
+/// chunks, base chunk hot). Offsets give the row range of each chunk
+/// (cumulative u64; `chunks[i]` covers rows `[offsets[i]..offsets[i+1])`).
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkedParts<'a> {
+    /// Children in slot order; `chunks[i]` is the i-th chunk, all sharing
+    /// the outer dtype.
+    pub chunks: &'a [Option<ArrayRef>],
+    /// Cumulative row offsets (u64), length nchunks+1.
+    pub chunk_offsets: &'a ArrayRef,
+    /// Logical row count.
+    pub len: usize,
+}
+
+unsafe impl<T: NativePType> RawParts<T> for crate::arrays::Chunked {
+    type Parts<'a> = ChunkedParts<'a>;
+    fn raw_parts<'a>(array: &'a ArrayRef) -> Option<Self::Parts<'a>> {
+        use crate::arrays::chunked::ChunkedArrayExt as _;
+        if array.dtype() != &T::dtype_of() {
+            return None;
+        }
+        let slots = array.slots();
+        let chunk_offsets = slots
+            .get(ChunkedSlots::CHUNK_OFFSETS)
+            .and_then(|s| s.as_ref())?;
+        // Variadic tail: children are slots [CHUNK_OFFSETS+1..].
+        let first_chunk = ChunkedSlots::CHUNK_OFFSETS + 1;
+        let chunks = &slots[first_chunk..];
+        Some(ChunkedParts {
+            chunks,
+            chunk_offsets,
+            len: array.len(),
+        })
+    }
 }

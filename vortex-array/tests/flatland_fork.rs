@@ -367,3 +367,31 @@ fn patch_contents_u32(p: &Patches) -> (Vec<u32>, Vec<u32>) {
         values.as_slice::<u32>().to_vec(),
     )
 }
+
+// ── Part 3 #3 + Part 13: ChunkedParts (cursor walks chunks) ────────────────
+
+#[test]
+fn raw_parts_chunked_walks_chunks() {
+    use vortex_array::arrays::ChunkedArray;
+    use vortex_array::flatland::raw_parts::{ChunkedParts, RawParts};
+    let c1 = i64_array(&[1, 2, 3]);
+    let c2 = i64_array(&[4, 5]);
+    let chunked = ChunkedArray::try_new(vec![c1, c2], i64_array(&[]).dtype().clone())
+        .vortex_expect("chunked")
+        .into_array();
+    let parts: ChunkedParts = <vortex_array::arrays::Chunked as RawParts<i64>>::raw_parts(&chunked)
+        .vortex_expect("chunked parts");
+    assert_eq!(parts.len, 5);
+    assert_eq!(parts.chunks.len(), 2);
+    // Offsets: [0, 3, 5] cumulative.
+    let offsets = parts
+        .chunk_offsets
+        .clone()
+        .execute::<PrimitiveArray>(&mut vortex_array::legacy_session().create_execution_ctx())
+        .vortex_expect("offsets exec");
+    assert_eq!(offsets.as_slice::<u64>(), &[0, 3, 5]);
+    // Wrong element ptype → None.
+    assert!(
+        <vortex_array::arrays::Chunked as RawParts<u32>>::raw_parts(&chunked).is_none()
+    );
+}
