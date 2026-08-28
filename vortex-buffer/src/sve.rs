@@ -241,3 +241,340 @@ fn add_const_u32_scalar(a: &[u32], c: u32, out: &mut [u32]) {
         *o = v.wrapping_add(c);
     }
 }
+
+// =============================================================================
+// Bitwise ops + compaction filter (Part 3 #4 filter/bit-ops tiers)
+// =============================================================================
+
+/// Element-wise bitwise op: `out[i] = a[i] op b[i]` (Not is unary).
+pub fn bitwise_u32(op: BitwiseOp, a: &[u32], b: &[u32], out: &mut [u32]) {
+    match op {
+        BitwiseOp::And => bitwise_and_u32(a, b, out),
+        BitwiseOp::Or => bitwise_or_u32(a, b, out),
+        BitwiseOp::Xor => bitwise_xor_u32(a, b, out),
+        BitwiseOp::Not => bitwise_not_u32(a, out),
+    }
+}
+
+/// Bitwise operation selector for [`bitwise_u32`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitwiseOp {
+    /// Bitwise AND.
+    And,
+    /// Bitwise OR.
+    Or,
+    /// Bitwise XOR.
+    Xor,
+    /// Bitwise NOT (unary; `b` is ignored).
+    Not,
+}
+
+fn bitwise_and_u32(a: &[u32], b: &[u32], out: &mut [u32]) {
+    static KERNEL: CpuKernel<unsafe fn(&[u32], &[u32], &mut [u32])> = CpuKernel::new(|| {
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("sve") {
+                return and_u32_sve;
+            }
+            return and_u32_neon;
+        }
+        #[allow(unreachable_code)]
+        and_u32_scalar
+    });
+    unsafe { (KERNEL.get())(a, b, out) }
+}
+
+fn bitwise_or_u32(a: &[u32], b: &[u32], out: &mut [u32]) {
+    static KERNEL: CpuKernel<unsafe fn(&[u32], &[u32], &mut [u32])> = CpuKernel::new(|| {
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("sve") {
+                return or_u32_sve;
+            }
+            return or_u32_neon;
+        }
+        #[allow(unreachable_code)]
+        or_u32_scalar
+    });
+    unsafe { (KERNEL.get())(a, b, out) }
+}
+
+fn bitwise_xor_u32(a: &[u32], b: &[u32], out: &mut [u32]) {
+    static KERNEL: CpuKernel<unsafe fn(&[u32], &[u32], &mut [u32])> = CpuKernel::new(|| {
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("sve") {
+                return xor_u32_sve;
+            }
+            return xor_u32_neon;
+        }
+        #[allow(unreachable_code)]
+        xor_u32_scalar
+    });
+    unsafe { (KERNEL.get())(a, b, out) }
+}
+
+fn bitwise_not_u32(a: &[u32], out: &mut [u32]) {
+    static KERNEL: CpuKernel<unsafe fn(&[u32], &mut [u32])> = CpuKernel::new(|| {
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("sve") {
+                return not_u32_sve;
+            }
+            return not_u32_neon;
+        }
+        #[allow(unreachable_code)]
+        not_u32_scalar
+    });
+    unsafe { (KERNEL.get())(a, out) }
+}
+
+/// Compaction filter: append `src[i]` to `out` where `keep[i] != 0`.
+/// Returns the number of kept rows. `out` may be shorter than `src`; it is
+/// reused across calls (cleared then extended).
+pub fn filter_compact_u32(src: &[u32], keep: &[u32], out: &mut Vec<u32>) -> usize {
+    debug_assert_eq!(src.len(), keep.len(), "src/keep length mismatch");
+    out.clear();
+    let count = compact_count_u32(keep);
+    out.reserve(count);
+    // Compact writing via the tier (raw-pointer write into reserved capacity).
+    let written = compact_into(src, keep, out);
+    // SAFETY: written <= capacity (reserved with the count pre-pass) and the
+    // kernel initialized exactly the first `written` rows.
+    unsafe { out.set_len(written) };
+    written
+}
+
+/// Count nonzero lanes (for capacity planning) without compacting.
+pub fn compact_count_u32(keep: &[u32]) -> usize {
+    static KERNEL: CpuKernel<unsafe fn(&[u32]) -> usize> = CpuKernel::new(|| {
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("sve") {
+                return compact_count_u32_sve;
+            }
+            return compact_count_u32_neon;
+        }
+        compact_count_u32_scalar
+    });
+    // SAFETY: selector probed features; count tiers are pure.
+    unsafe { (KERNEL.get())(keep) }
+}
+
+/// Write the kept lanes into the front of `out`; returns rows written.
+fn compact_into(src: &[u32], keep: &[u32], out: &mut Vec<u32>) -> usize {
+    static KERNEL: CpuKernel<unsafe fn(&[u32], &[u32], *mut u32, usize) -> usize> =
+        CpuKernel::new(|| {
+            #[cfg(target_arch = "aarch64")]
+            {
+                if std::arch::is_aarch64_feature_detected!("sve") {
+                    return compact_into_u32_sve;
+                }
+                return compact_into_u32_neon;
+            }
+            compact_into_u32_scalar
+        });
+    // SAFETY: `out` is assumed to have capacity >= src.len() (caller reserved
+    // with the count pre-pass); the kernel writes at most `capacity` rows.
+    let cap = out.capacity();
+    let ptr = out.as_mut_ptr();
+    unsafe { (KERNEL.get())(src, keep, ptr, cap) }
+}
+
+// ---- SVE tiers ---------------------------------------------------------
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "sve")]
+unsafe fn and_u32_sve(a: &[u32], b: &[u32], out: &mut [u32]) {
+    use std::arch::aarch64::{svand_u32_x, svcntw, svld1_u32, svst1_u32, svwhilelt_b32_u32};
+    unsafe {
+        let (mut i, vl) = (0usize, svcntw() as usize);
+        while i < a.len() {
+            let pg = svwhilelt_b32_u32(i as u32, a.len() as u32);
+            let x = svand_u32_x(pg, svld1_u32(pg, a.as_ptr().add(i)), svld1_u32(pg, b.as_ptr().add(i)));
+            svst1_u32(pg, out.as_mut_ptr().add(i), x);
+            i += vl;
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "sve")]
+unsafe fn or_u32_sve(a: &[u32], b: &[u32], out: &mut [u32]) {
+    use std::arch::aarch64::{svcntw, svld1_u32, svorr_u32_x, svst1_u32, svwhilelt_b32_u32};
+    unsafe {
+        let (mut i, vl) = (0usize, svcntw() as usize);
+        while i < a.len() {
+            let pg = svwhilelt_b32_u32(i as u32, a.len() as u32);
+            let x = svorr_u32_x(pg, svld1_u32(pg, a.as_ptr().add(i)), svld1_u32(pg, b.as_ptr().add(i)));
+            svst1_u32(pg, out.as_mut_ptr().add(i), x);
+            i += vl;
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "sve")]
+unsafe fn xor_u32_sve(a: &[u32], b: &[u32], out: &mut [u32]) {
+    use std::arch::aarch64::{svcntw, svld1_u32, svst1_u32, sveor_u32_x, svwhilelt_b32_u32};
+    unsafe {
+        let (mut i, vl) = (0usize, svcntw() as usize);
+        while i < a.len() {
+            let pg = svwhilelt_b32_u32(i as u32, a.len() as u32);
+            let x = sveor_u32_x(pg, svld1_u32(pg, a.as_ptr().add(i)), svld1_u32(pg, b.as_ptr().add(i)));
+            svst1_u32(pg, out.as_mut_ptr().add(i), x);
+            i += vl;
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "sve")]
+unsafe fn not_u32_sve(a: &[u32], out: &mut [u32]) {
+    use std::arch::aarch64::{svcntw, sveor_u32_x, svld1_u32, svst1_u32, svdup_n_u32, svwhilelt_b32_u32};
+    unsafe {
+        let (mut i, vl) = (0usize, svcntw() as usize);
+        let ones = svdup_n_u32(u32::MAX);
+        while i < a.len() {
+            let pg = svwhilelt_b32_u32(i as u32, a.len() as u32);
+            let x = sveor_u32_x(pg, svld1_u32(pg, a.as_ptr().add(i)), ones);
+            svst1_u32(pg, out.as_mut_ptr().add(i), x);
+            i += vl;
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "sve")]
+unsafe fn compact_count_u32_sve(keep: &[u32]) -> usize {
+    use std::arch::aarch64::{
+        svcmpeq_u32, svcntp_b32, svcntw, svdup_n_u32, svld1_u32, svnot_b_z, svwhilelt_b32_u32,
+    };
+    unsafe {
+        let (mut i, mut count, vl) = (0usize, 0usize, svcntw() as usize);
+        let zero = svdup_n_u32(0);
+        while i < keep.len() {
+            let pg = svwhilelt_b32_u32(i as u32, keep.len() as u32);
+            let nonzero = svnot_b_z(pg, svcmpeq_u32(pg, svld1_u32(pg, keep.as_ptr().add(i)), zero));
+            count += svcntp_b32(pg, nonzero) as usize;
+            i += vl;
+        }
+        count
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "sve")]
+unsafe fn compact_into_u32_sve(src: &[u32], keep: &[u32], out: *mut u32, cap: usize) -> usize {
+    use std::arch::aarch64::{
+        svcmpeq_u32, svcntp_b32, svcntw, svcompact_s32, svdup_n_u32, svld1_u32, svnot_b_z,
+        svptrue_b32, svst1_u32, svwhilelt_b32_u32,
+    };
+    unsafe {
+        let _ = cap;
+        let (mut i, mut w, vl) = (0usize, 0usize, svcntw() as usize);
+        // The predicate's true-count comes from the count tier; we compact and
+        // append into the output pointer, tracking `w` via per-iter counts.
+        while i < src.len() {
+            let pg = svwhilelt_b32_u32(i as u32, src.len() as u32);
+            let v = svld1_u32(pg, src.as_ptr().add(i));
+            let keepv = svld1_u32(pg, keep.as_ptr().add(i));
+            let nonzero = svnot_b_z(pg, svcmpeq_u32(pg, keepv, svdup_n_u32(0)));
+            let n_kept = svcntp_b32(pg, nonzero) as usize;
+            if n_kept > 0 {
+                let compacted = svcompact_s32(nonzero, std::mem::transmute(v));
+                svst1_u32(svptrue_b32(), out.add(w), std::mem::transmute(compacted));
+                w += n_kept;
+            }
+            i += vl;
+        }
+        w
+    }
+}
+
+
+// ---- NEON tiers ---------------------------------------------------------
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn and_u32_neon(a: &[u32], b: &[u32], out: &mut [u32]) {
+    and_u32_scalar(a, b, out)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn or_u32_neon(a: &[u32], b: &[u32], out: &mut [u32]) {
+    or_u32_scalar(a, b, out)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn xor_u32_neon(a: &[u32], b: &[u32], out: &mut [u32]) {
+    xor_u32_scalar(a, b, out)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn not_u32_neon(a: &[u32], out: &mut [u32]) {
+    not_u32_scalar(a, out)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn compact_count_u32_neon(keep: &[u32]) -> usize {
+    compact_count_u32_scalar(keep)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn compact_into_u32_neon(src: &[u32], keep: &[u32], out: *mut u32, cap: usize) -> usize {
+    compact_into_u32_scalar(src, keep, out, cap)
+}
+
+// ---- Scalar tiers ---------------------------------------------------------
+
+fn and_u32_scalar(a: &[u32], b: &[u32], out: &mut [u32]) {
+    assert_eq!(a.len(), b.len());
+    for ((o, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
+        *o = x & y;
+    }
+}
+
+fn or_u32_scalar(a: &[u32], b: &[u32], out: &mut [u32]) {
+    assert_eq!(a.len(), b.len());
+    for ((o, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
+        *o = x | y;
+    }
+}
+
+fn xor_u32_scalar(a: &[u32], b: &[u32], out: &mut [u32]) {
+    assert_eq!(a.len(), b.len());
+    for ((o, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
+        *o = x ^ y;
+    }
+}
+
+fn not_u32_scalar(a: &[u32], out: &mut [u32]) {
+    for (o, &v) in out.iter_mut().zip(a.iter()) {
+        *o = !v;
+    }
+}
+
+fn compact_count_u32_scalar(keep: &[u32]) -> usize {
+    keep.iter().filter(|&&k| k != 0).count()
+}
+
+fn compact_into_u32_scalar(src: &[u32], keep: &[u32], out: *mut u32, cap: usize) -> usize {
+    assert_eq!(src.len(), keep.len());
+    let mut w = 0usize;
+    for (i, &k) in keep.iter().enumerate() {
+        if k != 0 {
+            if w >= cap {
+                break; // safety net; caller pre-reserved
+            }
+            unsafe { *out.add(w) = src[i] };
+            w += 1;
+        }
+    }
+    w
+}

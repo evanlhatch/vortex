@@ -89,3 +89,46 @@ fn sve_hardware_present_on_this_host() {
         );
     }
 }
+
+#[test]
+fn bitwise_matches_scalar() {
+    for n in [1usize, 17, 33, 64, 257] {
+        let a: Vec<u32> = (0..n as u32).map(|i| i.wrapping_mul(2654435761)).collect();
+        let b: Vec<u32> = (0..n as u32).map(|i| i.wrapping_mul(40503)).collect();
+        let mut out = vec![0u32; n];
+        sve::bitwise_u32(sve::BitwiseOp::And, &a, &b, &mut out);
+        assert_eq!(out, a.iter().zip(&b).map(|(x, y)| x & y).collect::<Vec<_>>(), "and n={n}");
+        sve::bitwise_u32(sve::BitwiseOp::Or, &a, &b, &mut out);
+        assert_eq!(out, a.iter().zip(&b).map(|(x, y)| x | y).collect::<Vec<_>>(), "or n={n}");
+        sve::bitwise_u32(sve::BitwiseOp::Xor, &a, &b, &mut out);
+        assert_eq!(out, a.iter().zip(&b).map(|(x, y)| x ^ y).collect::<Vec<_>>(), "xor n={n}");
+        sve::bitwise_u32(sve::BitwiseOp::Not, &a, &b, &mut out);
+        assert_eq!(out, a.iter().map(|&x| !x).collect::<Vec<_>>(), "not n={n}");
+    }
+}
+
+#[test]
+fn filter_compact_matches_scalar() {
+    for (n, density) in [(1usize, 2usize), (17, 3), (32, 1), (33, 4), (100, 7), (257, 13)] {
+        let src: Vec<u32> = (0..n as u32).collect();
+        let keep: Vec<u32> = (0..n as u32).map(|i| (i % density as u32 == 0) as u32).collect();
+        let mut out = Vec::with_capacity(n);
+        let written = sve::filter_compact_u32(&src, &keep, &mut out);
+        let expect: Vec<u32> = src
+            .iter()
+            .zip(&keep)
+            .filter(|(_, k)| **k != 0)
+            .map(|(&v, _)| v)
+            .collect();
+        assert_eq!(written, expect.len(), "count n={n} density={density}");
+        assert_eq!(out, expect, "compact n={n} density={density}");
+    }
+}
+
+#[test]
+fn compact_count_matches() {
+    let keep = vec![1u32, 0, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1];
+    assert_eq!(sve::compact_count_u32(&keep), 6);
+    assert_eq!(sve::compact_count_u32(&[0u32; 33]), 0);
+    assert_eq!(sve::compact_count_u32(&[1u32; 64]), 64);
+}
