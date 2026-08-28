@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
 /// Crates we actually fork/modify. Everything else stays upstream-at-rest.
-const WANT: &[&str] = &["vortex-array", "vortex-compute", "encodings/fastlanes"];
+const WANT: &[&str] = &["vortex-array", "vortex-compute", "encodings/fastlanes", "encodings/zigzag"];
 
 fn git(args: &[&str]) -> String {
     let out = Command::new("git").args(args).output().unwrap_or_else(|e| {

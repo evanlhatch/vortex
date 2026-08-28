@@ -1,9 +1,11 @@
 [workspace]
 # fork-sync: pruned to flatland closure (rerun `cargo -Zscript fork-sync.rs --base <ref>` after upstream bumps)
+# fork-sync: pruned to flatland closure (rerun `cargo -Zscript fork-sync.rs --base <ref>` after upstream bumps)
 members = [
     "benchmarks/bench-support",
     "encodings/alp",
     "encodings/fastlanes",
+    "encodings/zigzag",
     "vortex-array",
     "vortex-array-macros",
     "vortex-buffer",
