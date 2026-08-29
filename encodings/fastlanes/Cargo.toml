@@ -59,6 +59,10 @@ harness = false
 required-features = ["_test-harness"]
 
 [[bench]]
+name = "unpack"
+harness = false
+
+[[bench]]
 name = "bitpack_compare"
 harness = false
 

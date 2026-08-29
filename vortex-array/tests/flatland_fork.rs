@@ -458,6 +458,7 @@ fn prop_merge_in_place_matches_try_merge_random() {
             let mut b = patches(&self_idx, &self_val, len);
             let o = patches(&other_idx, &other_val, len);
 
+            b.try_merge(&o).vortex_expect("try_merge");
             let via_inplace = a.merge_in_place(&o);
             assert_eq!(
                 via_inplace.is_some(),
@@ -504,11 +505,21 @@ fn prop_diff_fast_matches_scalar_reference() {
         let values: Vec<u32> = indices.iter().map(|&i| new[i as usize]).collect();
 
         assert_eq!(patches.array_len(), len);
-        let (got_idx, got_vals_raw) = patch_contents(&patches);
+        // diff's patches carry u32 values — extract as u32 (the shared
+        // patch_contents helper is i64-typed).
+        let idx_arr = patches
+            .indices()
+            .clone()
+            .execute::<PrimitiveArray>(ctx)
+            .vortex_expect("indices execute");
+        let got_idx: Vec<u32> = idx_arr.as_slice::<u32>().to_vec();
+        let vals_arr = patches
+            .values()
+            .clone()
+            .execute::<PrimitiveArray>(ctx)
+            .vortex_expect("values execute");
+        let got_vals: Vec<u32> = vals_arr.as_slice::<u32>().to_vec();
         assert_eq!(got_idx, indices, "indices (seed {seed})");
-        // Values ride `new`'s array — re-execute to compare as i64 contents.
-        assert_eq!(got_vals_raw.len(), values.len());
-        let got_vals: Vec<u32> = got_vals_raw.iter().map(|&v| v as u32).collect();
         assert_eq!(got_vals, values, "values (seed {seed})");
     }
 }

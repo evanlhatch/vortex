@@ -58,33 +58,38 @@ pub fn unpack_u32(packed: &[u32], bit_width: u8, out: &mut [u32]) {
     });
 
     let mut scratch = [0u32; BLOCK];
-    for block in 0..n_blocks {
+    let full_blocks = out.len() / BLOCK;
+    for block in 0..full_blocks {
         let words = &packed[block * words_per_block..][..words_per_block];
-        let out_block = &mut out[block * BLOCK..];
-        if out_block.len() == BLOCK {
-            // SAFETY: the selector probed the required feature; both tiers
-            // write exactly BLOCK values from words_per_block packed words.
-            unsafe { (KERNEL.get())(words, bit_width as usize, out_block.try_into().unwrap()) };
-        } else {
-            // Partial trailing block: decode into scratch, copy the tail.
-            // SAFETY: as above; scratch is exactly BLOCK long.
-            unsafe { (KERNEL.get())(words, bit_width as usize, &mut scratch) };
-            out_block.copy_from_slice(&scratch[..out_block.len()]);
-        }
+        // SAFETY: the selector probed the required feature; both tiers write
+        // exactly BLOCK values from words_per_block packed words.
+        let out_block: &mut [u32; BLOCK] =
+            (&mut out[block * BLOCK..][..BLOCK]).try_into().unwrap();
+        unsafe { (KERNEL.get())(words, bit_width as usize, out_block) };
+    }
+    let tail = out.len() % BLOCK;
+    if tail > 0 {
+        let words = &packed[full_blocks * words_per_block..][..words_per_block];
+        // Partial trailing block: decode into scratch, copy the tail.
+        // SAFETY: as above; scratch is exactly BLOCK long.
+        unsafe { (KERNEL.get())(words, bit_width as usize, &mut scratch) };
+        out[full_blocks * BLOCK..].copy_from_slice(&scratch[..tail]);
     }
 }
 
-/// fastlanes baseline: the crate's own SIMD unpack at runtime width.
-fn unpack_block_u32_fastlanes(packed: &[u32], width: usize, out: &mut [u32; BLOCK]) {
+/// fastlanes baseline tier: the crate's own SIMD unpack at runtime width.
+/// `pub` so the tier-parity tests/benches can pin both sides directly.
+pub fn unpack_block_u32_fastlanes(packed: &[u32], width: usize, out: &mut [u32; BLOCK]) {
     // SAFETY: packed.len() == 32*width (checked by the caller's slicing) and
     // out is exactly 1024 — `unchecked_unpack`'s contract.
     unsafe { BitPacking::unchecked_unpack(width, packed, out) }
 }
 
-/// SVE tier: lane-vectorized FastLanes unpack, no gathers.
+/// SVE tier: lane-vectorized FastLanes unpack, no gathers. `pub unsafe` for
+/// the tier-parity tests/benches; callers must uphold the block contract.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "sve")]
-unsafe fn unpack_block_u32_sve(packed: &[u32], width: usize, out: &mut [u32; BLOCK]) {
+pub unsafe fn unpack_block_u32_sve(packed: &[u32], width: usize, out: &mut [u32; BLOCK]) {
     use std::arch::aarch64::{
         svand_n_u32_x, svcntw, svld1_u32, svlsr_n_u32_x, svlsl_n_u32_x, svorr_u32_x, svst1_u32,
         svwhilelt_b32_u32,
@@ -159,43 +164,3 @@ unsafe fn unpack_block_u32_sve(packed: &[u32], width: usize, out: &mut [u32; BLO
 }
 
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn reference_block(packed: &[u32], width: u8) -> [u32; BLOCK] {
-        let mut out = [0u32; BLOCK];
-        // SAFETY: contract identical to unpack_block_u32_fastlanes.
-        unsafe { BitPacking::unchecked_unpack(width as usize, packed, &mut out) };
-        out
-    }
-
-    #[test]
-    fn sve_tier_matches_fastlanes_baseline() {
-        let width = 11u8;
-        let packed: Vec<u32> = (0..32 * width as usize)
-            .map(|i| (i as u32).wrapping_mul(0x9E3779B1) | 1)
-            .collect();
-        let mut out = [0u32; BLOCK];
-        // SAFETY: full block at the contract width.
-        unsafe { unpack_block_u32_sve(&packed, width as usize, &mut out) };
-        assert_eq!(out, reference_block(&packed, width));
-    }
-
-    #[test]
-    fn unpack_u32_partial_tail() {
-        let width = 5u8;
-        let packed: Vec<u32> = vec![0xDEADBEEF; 2 * 32 * width as usize];
-        let mut out = vec![0u32; 1500]; // 1 full block + 476 tail
-        unpack_u32(&packed, width, &mut out);
-        let mut expect = [0u32; BLOCK];
-        // SAFETY: as above.
-        unsafe { BitPacking::unchecked_unpack(width as usize, &packed[..32 * width as usize], &mut expect) };
-        assert_eq!(&out[..1024], &expect);
-        // Tail re-decodes the second block's prefix.
-        let mut expect2 = [0u32; BLOCK];
-        // SAFETY: as above.
-        unsafe { BitPacking::unchecked_unpack(width as usize, &packed[32 * width as usize..], &mut expect2) };
-        assert_eq!(&out[1024..1500], &expect2[..476]);
-    }
-}
