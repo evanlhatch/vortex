@@ -10,7 +10,6 @@
 use std::hint::black_box;
 
 use divan::Bencher;
-use fastlanes::BitPacking;
 use vortex_fastlanes::flatland::unpack::{
     unpack_block_u32_fastlanes, unpack_block_u32_sve, unpack_u32,
 };
