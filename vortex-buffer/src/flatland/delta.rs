@@ -69,10 +69,17 @@ impl<T: Copy> DeltaBuffer<T> {
         self.rows == 0
     }
 
-    /// Number of hot (written) rows.
+    /// Number of hot (written) rows — word-level popcount over the presence
+    /// bitmap, not per-row bit tests (called per overlay per tick).
     #[inline]
     pub fn patch_count(&self) -> usize {
-        (0..self.rows).filter(|&i| self.presence.value(i)).count()
+        let bytes = self.presence.as_slice();
+        let mut count: usize = bytes.iter().map(|b| b.count_ones() as usize).sum();
+        // Zero any padding bits past `rows` in the final byte.
+        if self.rows % 8 != 0 && !bytes.is_empty() {
+            count -= (bytes[bytes.len() - 1] >> (self.rows % 8)).count_ones() as usize;
+        }
+        count
     }
 
     /// Whether row `i` has an overlay value.
