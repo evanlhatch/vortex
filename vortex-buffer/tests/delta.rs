@@ -63,3 +63,55 @@ fn u32_and_f64_types() {
     fo.blend(&fbase, &mut fout);
     assert_eq!(fout, vec![0.0, 9.5, 1.0, 1.5]);
 }
+
+// ── Fuzz ingress (REBUILD Part 12: delta apply boundary) ──────────────────
+// Seeded structural fuzzing of the delta-apply ingress — a bolero harness
+// needs dependency sign-off, so these run deterministic pseudo-random cases
+// instead. Same ingress surface: blend ≡ per-row select, all densities.
+
+struct Lcg(u64);
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+}
+
+#[test]
+fn fuzz_blend_matches_per_row_select() {
+    for seed in 0..256u64 {
+        let mut state = seed | 1;
+        let mut rng = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state >> 33
+        };
+        let rows = (seed as usize % 300) + 1;
+        let base: Vec<u64> = (0..rows as u64).map(|i| i.wrapping_mul(0x9E3779B1)).collect();
+        let mut overlay = DeltaBuffer::<u64>::new(rows, 0);
+        // Patch density sweeps: sparse (1/64), medium (1/4), dense (1/1).
+        for density in [64u64, 4, 1] {
+            for row in 0..rows {
+                if rng() % density == 0 {
+                    overlay.set(row, base[row].wrapping_add(row as u64).wrapping_mul(7));
+                }
+            }
+            // Adversarial: sometimes overwrite the same row (last-write-wins).
+            if rows > 0 {
+                let hot = (rng() as usize) % rows;
+                overlay.set(hot, u64::MAX);
+            }
+
+            let mut out = Vec::with_capacity(rows);
+            overlay.blend(&base, &mut out);
+            let reference: Vec<u64> = (0..rows)
+                .map(|i| if overlay.is_patched(i) { overlay.value(i) } else { base[i] })
+                .collect();
+            assert_eq!(out, reference, "blend ≡ select (seed {seed}, density {density})");
+            assert_eq!(out.len(), rows, "out length");
+    
+        }
+    }
+}

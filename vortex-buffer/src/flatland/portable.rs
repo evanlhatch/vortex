@@ -44,7 +44,6 @@ pub fn neq_lanes_u32(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
 
 pub(crate) fn neq_u32_portable(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
     debug_assert_eq!(lhs.len(), rhs.len());
-    let len = lhs.len();
     let one = Simd::<u32, LANES>::splat(1);
     let zero = Simd::<u32, LANES>::splat(0);
     let mut idx = 0;
@@ -151,7 +150,6 @@ pub fn add_const_u32(values: &[u32], constant: u32, out: &mut [u32]) {
 
 pub(crate) fn add_const_portable(values: &[u32], constant: u32, out: &mut [u32]) {
     let constant_lanes = Simd::<u32, LANES>::splat(constant);
-    let len = values.len();
     let mut idx = 0;
     while idx + LANES <= values.len() {
         let lanes = Simd::<u32, LANES>::from_slice(&values[idx..idx + LANES]);

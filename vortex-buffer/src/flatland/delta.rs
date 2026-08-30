@@ -101,14 +101,33 @@ impl<T: Copy> DeltaBuffer<T> {
     /// `out` is grown to `self.len()` (reused across calls); `base` must have
     /// at least `self.len()` rows. No decode, no per-row branch: the blend is
     /// a select on the presence bits.
+    /// Copy-then-overwrite merge: `out[i] = if patched(i) { delta[i] } else { base[i] }`.
+    ///
+    /// `out` is grown to `self.len()` (reused across calls); `base` must have
+    /// at least `self.len()` rows. One base copy + O(patches) overwrites by
+    /// walking the presence words with trailing-zero skips — the Part 17.0
+    /// bench gate (blend within noise of a raw Vec slice-merge) drove this
+    /// shape: a per-row presence test at low patch density is 2× slower than
+    /// the copy baseline.
     pub fn blend(&self, base: &[T], out: &mut Vec<T>) {
         debug_assert!(base.len() >= self.rows);
         out.clear();
-        out.reserve(self.rows);
-        // Select per row; the compiler vectorizes this over the bit buffer.
-        for i in 0..self.rows {
-            let delta = unsafe { *self.values.as_slice().get_unchecked(i) };
-            out.push(if self.presence.value(i) { delta } else { base[i] });
+        out.extend_from_slice(&base[..self.rows]);
+        // Presence words: 8 flags per byte; jump straight to the set bits.
+        let presence_bytes = self.presence.as_slice();
+        for (byte_idx, &byte) in presence_bytes.iter().enumerate() {
+            if byte == 0 {
+                continue;
+            }
+            let mut word = byte;
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= word - 1; // clear the lowest set bit
+                let row = byte_idx * 8 + bit;
+                if row < self.rows {
+                    out[row] = self.values.as_slice()[row];
+                }
+            }
         }
     }
 

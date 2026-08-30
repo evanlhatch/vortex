@@ -634,7 +634,7 @@ impl<T> From<Vec<T>> for Buffer<T>
 where
     T: Send + 'static,
 {
-    fn from(mut value: Vec<T>) -> Self {
+    fn from(value: Vec<T>) -> Self {
         let original_len = value.len();
 
         // Empty vecs have a dangling pointer that may be misaligned for T;
