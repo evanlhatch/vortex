@@ -283,3 +283,25 @@ pub fn scatter_u32_portable(keys: &[u32], vals: &[u32], out: &mut [u32]) {
 fn lane_valid(idx: usize, len: usize) -> Mask<i32, LANES> {
     Mask::from_array(std::array::from_fn(|k| idx + k < len))
 }
+
+// =============================================================================
+// Fused multiply-add-const (the affine Primitive mul path, native lanes)
+// =============================================================================
+
+/// `out[i] = values[i] * constant + addend` (wrapping), native-lane SIMD.
+/// The affine kernel's mul-path body — replaces the scalar wrap loop, kills
+/// the f64 interchange (u64 columns keep exactness above 2^53).
+pub fn mul_add_const_u32(values: &[u32], constant: u32, addend: u32, out: &mut [u32]) {
+    let cv = Simd::<u32, LANES>::splat(constant);
+    let av = Simd::<u32, LANES>::splat(addend);
+    let mut idx = 0;
+    while idx + LANES <= values.len() {
+        let lanes = Simd::<u32, LANES>::from_slice(&values[idx..]);
+        (lanes * cv + av).copy_to_slice(&mut out[idx..idx + LANES]);
+        idx += LANES;
+    }
+    while idx < values.len() {
+        out[idx] = values[idx].wrapping_mul(constant).wrapping_add(addend);
+        idx += 1;
+    }
+}
