@@ -260,3 +260,25 @@ fn blend_raw_vec_baseline(b: Bencher) {
         black_box(&out);
     });
 }
+
+#[divan::bench]
+fn neq_indices_portable(b: Bencher) {
+    let (a, bb) = neq_inputs();
+    b.bench(|| {
+        let mut out = Vec::new();
+        vortex_buffer::portable::neq_indices_u32(
+            black_box(&a),
+            black_box(&bb),
+            black_box(&mut out),
+        )
+    });
+}
+
+#[divan::bench]
+fn neq_indices_sve2_compact(b: Bencher) {
+    let (a, bb) = neq_inputs();
+    b.bench(|| {
+        let mut out = Vec::new();
+        sve::neq_indices_u32(black_box(&a), black_box(&bb), black_box(&mut out))
+    });
+}

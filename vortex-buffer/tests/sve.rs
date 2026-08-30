@@ -199,3 +199,30 @@ fn portable_gather_scatter_match_reference() {
         assert_eq!(target, expect, "scatter (n {n})");
     }
 }
+
+#[test]
+fn neq_indices_tiers_agree() {
+    use vortex_buffer::flatland::sve;
+    // SVE2 svcompact(iota) tier vs portable table-gather tier — the
+    // arbitration pair must agree exactly on indices (order included).
+    let n = 1000;
+    let a: Vec<u32> = (0..n as u32).map(|i| i.wrapping_mul(2654435761)).collect();
+    let b: Vec<u32> = a.iter().map(|&v| if v % 3 == 0 { v + 1 } else { v }).collect();
+    let mut via_sve = Vec::new();
+    let mut via_portable = Vec::new();
+    let expected = sve_indices(&a, &b);
+    let n_sve = sve::neq_indices_u32(&a, &b, &mut via_sve);
+    let n_portable = vortex_buffer::portable::neq_indices_u32(&a, &b, &mut via_portable);
+    assert_eq!(n_sve, n_portable);
+    assert_eq!(sve_indices(&a, &b), via_sve);
+    assert_eq!(sve_indices(&a, &b), via_portable);
+    assert_eq!(via_sve, expected);
+}
+
+fn bb_placeholder(a: &[u32]) -> Vec<u32> {
+    a.iter().map(|&v| if v % 3 == 0 { v + 1 } else { v }).collect()
+}
+
+fn sve_indices(a: &[u32], b: &[u32]) -> Vec<u32> {
+    a.iter().zip(b).enumerate().filter(|(_, (x, y))| x != y).map(|(i, _)| i as u32).collect()
+}

@@ -80,10 +80,74 @@ pub fn neq_lanes_u32(a: &[u32], b: &[u32], out: &mut [u32]) {
     super::portable::neq_u32_portable(a, b, out)
 }
 
-/// Fused inequality→packed indices (see [`portable::neq_indices_u32`]).
-/// Portable `std::simd` tier everywhere — an SVE `svcompact(iota)` tier
-/// could beat it on aarch64; the bench arbitrates.
-pub use super::portable::neq_indices_u32;
+/// Fused inequality→packed indices: `out` gains the index of every row
+/// where `a[i] != b[i]`, packed contiguously; returns the count. SVE2 tier:
+/// compare → predicate → `svcompact` over an iota vector (variable-length
+/// vectors, one pass, no per-mask table). Falls back to the portable
+/// table-gather tier off SVE2.
+pub fn neq_indices_u32(a: &[u32], b: &[u32], out: &mut Vec<u32>) -> usize {
+    static KERNEL: CpuKernel<NeqIndicesKernel> = CpuKernel::new(|| {
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("sve2") {
+                return neq_indices_u32_sve;
+            }
+        }
+        #[allow(unreachable_code)]
+        super::portable::neq_indices_u32
+    });
+    // SAFETY: selector probed features; both tiers are pure (out grow-only).
+    unsafe { (KERNEL.get())(a, b, out) }
+}
+
+#[cfg(target_arch = "aarch64")]
+type NeqIndicesKernel = unsafe fn(&[u32], &[u32], &mut Vec<u32>) -> usize;
+
+#[cfg(not(target_arch = "aarch64"))]
+type NeqIndicesKernel = fn(&[u32], &[u32], &mut Vec<u32>) -> usize;
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "sve2")]
+unsafe fn neq_indices_u32_sve(a: &[u32], b: &[u32], out: &mut Vec<u32>) -> usize {
+    use std::arch::aarch64::{
+        svcmpne_u32, svcompact_s32, svcntp_b32, svcntw, svindex_u32, svint32_t, svld1_u32,
+        svnot_b_z, svptrue_b32, svst1_u32, svuint32_t, svwhilelt_b32_u32,
+    };
+    unsafe {
+        out.clear();
+        let (mut idx, mut written, step) = (0usize, 0usize, svcntw() as usize);
+        while idx < a.len() {
+            let pg = svwhilelt_b32_u32(idx as u32, a.len() as u32);
+            let av = svld1_u32(pg, a.as_ptr().add(idx));
+            let bv = svld1_u32(pg, b.as_ptr().add(idx));
+            // Zeroing predication: inactive lanes are excluded by pg.
+            let changed = svcmpne_u32(pg, av, bv);
+            let kept = svcntp_b32(pg, changed) as usize;
+            if kept > 0 {
+                // iota of the chunk, reinterpreted signed for svcompact_s32
+                // (lane layout identical; established reinterpret trick).
+                #[allow(clippy::cast_possible_truncation, reason = "u32 row-index convention")]
+                let iota: svuint32_t = svindex_u32(idx as u32, 1);
+                let compacted: svint32_t =
+                    svcompact_s32(changed, std::mem::transmute::<svuint32_t, svint32_t>(iota));
+                let compacted: svint32_t =
+                    svcompact_s32(changed, std::mem::transmute::<svuint32_t, svint32_t>(iota));
+                out.resize(written + kept, 0);
+                // Store exactly the compacted lanes — svptrue would write the
+                // full vector (garbage tail) past the reservation.
+                let store_pg = svwhilelt_b32_u32(written as u32, (written + kept) as u32);
+                svst1_u32(
+                    store_pg,
+                    out.as_mut_ptr().add(written),
+                    std::mem::transmute::<svint32_t, svuint32_t>(compacted),
+                );
+                written += kept;
+            }
+            idx += step;
+        }
+        written
+    }
+}
 
 
 /// `out[i] = a[i] + c` over u32 lanes (Part 13.5 dense lift), portable tier.
@@ -274,7 +338,9 @@ unsafe fn compact_into_u32_sve(src: &[u32], keep: &[u32], out: *mut u32, cap: us
                     std::mem::transmute::<svuint32_t, svint32_t>(value_lanes),
                 );
                 svst1_u32(
-                    svptrue_b32(),
+                    // Exact store predicate: only the kept prefix. svptrue
+                    // would write the full vector (garbage tail) past cap.
+                    svwhilelt_b32_u32(written as u32, written.saturating_add(kept_here) as u32),
                     out.add(written),
                     std::mem::transmute::<svint32_t, svuint32_t>(compacted),
                 );
