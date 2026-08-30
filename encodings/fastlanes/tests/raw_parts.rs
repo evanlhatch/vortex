@@ -4,6 +4,17 @@
 // Tests for the fastlanes RawParts impls (REBUILD Part 3 #3).
 // Builds FoR + BitPacked arrays and decodes through the parts.
 
+
+// Integration-test crate: every fn is a test; the legacy session helper is
+// the established flatland test fixture.
+#![allow(clippy::tests_outside_test_module)]
+#![allow(clippy::disallowed_methods, reason = "legacy_session is the flatland test fixture")]
+#![allow(clippy::min_ident_chars, reason = "short names are idiomatic in test bodies")]
+
+
+#![allow(clippy::cast_possible_truncation, reason = "flatland u32-key convention in tests/benches")]
+#![allow(clippy::redundant_clone, reason = "test fixtures; clarity over micro-optimization")]
+
 use vortex_array::IntoArray;
 use vortex_array::VortexSessionExecute;
 use vortex_array::arrays::PrimitiveArray;

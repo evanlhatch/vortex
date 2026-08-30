@@ -17,129 +17,149 @@
 //! portable SIMD is weakest.)
 
 use std::simd::Simd;
-use std::simd::Select;
 use std::simd::cmp::SimdPartialEq;
+use std::simd::Select;
 
 use crate::CpuKernel;
 
 /// Lane width for the portable tier. 256-bit with u32 lanes.
 const LANES: usize = 8;
 
-/// `out[i] = if a[i] != b[i] { 1 } else { 0 }`.
-pub fn neq_lanes_u32(a: &[u32], b: &[u32], out: &mut [u32]) {
-    static KERNEL: CpuKernel<fn(&[u32], &[u32], &mut [u32])> =
+/// Kernel shape shared by the binary elementwise stages.
+/// Kernel shape: two u32 slices in, one out.
+type U32BinaryKernel = fn(&[u32], &[u32], &mut [u32]);
+
+/// Unary u32 kernel shape (Not).
+type U32UnaryKernel = fn(&[u32], &mut [u32]);
+
+/// Constant-add kernel shape.
+type U32AddConstKernel = fn(&[u32], u32, &mut [u32]);
+
+/// `out[i] = if lhs[i] != rhs[i] { 1 } else { 0 }`.
+pub fn neq_lanes_u32(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    static KERNEL: CpuKernel<U32BinaryKernel> =
         CpuKernel::new(|| neq_u32_portable);
-    KERNEL.get()(a, b, out)
+    KERNEL.get()(lhs, rhs, out)
 }
 
-pub(crate) fn neq_u32_portable(a: &[u32], b: &[u32], out: &mut [u32]) {
-    debug_assert_eq!(a.len(), b.len());
-    let n = a.len();
-    let mut i = 0;
+pub(crate) fn neq_u32_portable(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    debug_assert_eq!(lhs.len(), rhs.len());
+    let len = lhs.len();
     let one = Simd::<u32, LANES>::splat(1);
     let zero = Simd::<u32, LANES>::splat(0);
-    while i + LANES <= n {
-        let av = Simd::<u32, LANES>::from_slice(&a[i..i + LANES]);
-        let bv = Simd::<u32, LANES>::from_slice(&b[i..i + LANES]);
-        av.simd_ne(bv).select(one, zero).copy_to_slice(&mut out[i..i + LANES]);
-        i += LANES;
+    let mut idx = 0;
+    while idx + LANES <= lhs.len() {
+        let av = Simd::<u32, LANES>::from_slice(&lhs[idx..idx + LANES]);
+        let bv = Simd::<u32, LANES>::from_slice(&rhs[idx..idx + LANES]);
+        av.simd_ne(bv)
+            .select(one, zero)
+            .copy_to_slice(&mut out[idx..idx + LANES]);
+        idx += LANES;
     }
-    while i < n {
-        out[i] = if a[i] != b[i] { 1 } else { 0 };
-        i += 1;
+    while idx < lhs.len() {
+        out[idx] = if lhs[idx] != rhs[idx] { 1 } else { 0 };
+        idx += 1;
     }
 }
 
 /// `out[i] = a[i] & b[i]`.
-pub fn and_u32(a: &[u32], b: &[u32], out: &mut [u32]) {
-    static KERNEL: CpuKernel<fn(&[u32], &[u32], &mut [u32])> =
+pub fn and_u32(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    static KERNEL: CpuKernel<U32BinaryKernel> =
         CpuKernel::new(|| and_u32_portable);
-    KERNEL.get()(a, b, out)
+    KERNEL.get()(lhs, rhs, out)
 }
 
-pub(crate) fn and_u32_portable(a: &[u32], b: &[u32], out: &mut [u32]) {
-    binary_loop(a, b, out, |x, y| x & y)
+pub(crate) fn and_u32_portable(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    binary_loop(lhs, rhs, out, |x, y| x & y)
 }
 
 /// `out[i] = a[i] | b[i]`.
-pub fn or_u32(a: &[u32], b: &[u32], out: &mut [u32]) {
-    static KERNEL: CpuKernel<fn(&[u32], &[u32], &mut [u32])> =
+pub fn or_u32(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    static KERNEL: CpuKernel<U32BinaryKernel> =
         CpuKernel::new(|| or_u32_portable);
-    KERNEL.get()(a, b, out)
+    KERNEL.get()(lhs, rhs, out)
 }
 
-pub(crate) fn or_u32_portable(a: &[u32], b: &[u32], out: &mut [u32]) {
-    binary_loop(a, b, out, |x, y| x | y)
+pub(crate) fn or_u32_portable(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    binary_loop(lhs, rhs, out, |x, y| x | y)
 }
 
 /// `out[i] = a[i] ^ b[i]`.
-pub fn xor_u32(a: &[u32], b: &[u32], out: &mut [u32]) {
-    static KERNEL: CpuKernel<fn(&[u32], &[u32], &mut [u32])> =
+pub fn xor_u32(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    static KERNEL: CpuKernel<U32BinaryKernel> =
         CpuKernel::new(|| xor_u32_portable);
-    KERNEL.get()(a, b, out)
+    KERNEL.get()(lhs, rhs, out)
 }
 
-pub(crate) fn xor_u32_portable(a: &[u32], b: &[u32], out: &mut [u32]) {
-    binary_loop(a, b, out, |x, y| x ^ y)
+pub(crate) fn xor_u32_portable(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    binary_loop(lhs, rhs, out, |x, y| x ^ y)
+}
+
+/// Generic binary SIMD loop: `out[i] = f(lhs[i], rhs[i])` over lane chunks + tail.
+#[inline]
+fn binary_loop(
+    lhs: &[u32],
+    rhs: &[u32],
+    out: &mut [u32],
+    f: impl Fn(Simd<u32, LANES>, Simd<u32, LANES>) -> Simd<u32, LANES>,
+) {
+    debug_assert_eq!(lhs.len(), rhs.len());
+    debug_assert_eq!(lhs.len(), out.len());
+    let len = lhs.len();
+    let mut idx = 0;
+    while idx + LANES <= len {
+        let lhs_lanes = Simd::<u32, LANES>::from_slice(&lhs[idx..idx + LANES]);
+        let rhs_lanes = Simd::<u32, LANES>::from_slice(&rhs[idx..idx + LANES]);
+        f(lhs_lanes, rhs_lanes).copy_to_slice(&mut out[idx..idx + LANES]);
+        idx += LANES;
+    }
+    while idx < len {
+        out[idx] = f(
+            Simd::<u32, LANES>::splat(lhs[idx]),
+            Simd::<u32, LANES>::splat(rhs[idx]),
+        )[0];
+        idx += 1;
+    }
 }
 
 /// `out[i] = !a[i]`.
-pub fn not_u32(a: &[u32], out: &mut [u32]) {
-    static KERNEL: CpuKernel<fn(&[u32], &mut [u32])> = CpuKernel::new(|| not_u32_portable);
-    KERNEL.get()(a, out)
+pub fn not_u32(lhs: &[u32], out: &mut [u32]) {
+    static KERNEL: CpuKernel<U32UnaryKernel> = CpuKernel::new(|| not_u32_portable);
+    KERNEL.get()(lhs, out)
 }
 
-pub(crate) fn not_u32_portable(a: &[u32], out: &mut [u32]) {
-    let n = a.len();
-    let mut i = 0;
-    while i + LANES <= n {
-        let av = Simd::<u32, LANES>::from_slice(&a[i..i + LANES]);
-        (!av).copy_to_slice(&mut out[i..i + LANES]);
-        i += LANES;
+pub(crate) fn not_u32_portable(values: &[u32], out: &mut [u32]) {
+    let len = values.len();
+    let mut idx = 0;
+    while idx + LANES <= len {
+        let lane = Simd::<u32, LANES>::from_slice(&values[idx..idx + LANES]);
+        (!lane).copy_to_slice(&mut out[idx..idx + LANES]);
+        idx += LANES;
     }
-    while i < n {
-        out[i] = !a[i];
-        i += 1;
+    while idx < values.len() {
+        out[idx] = !values[idx];
+        idx += 1;
     }
 }
 
-/// `out[i] = a[i] + c` (wrapping).
-pub fn add_const_u32(a: &[u32], c: u32, out: &mut [u32]) {
-    static KERNEL: CpuKernel<fn(&[u32], u32, &mut [u32])> =
+/// `out[i] = a[i] + constant` (wrapping).
+pub fn add_const_u32(values: &[u32], constant: u32, out: &mut [u32]) {
+    static KERNEL: CpuKernel<U32AddConstKernel> =
         CpuKernel::new(|| add_const_portable);
-    KERNEL.get()(a, c, out)
+    KERNEL.get()(values, constant, out)
 }
 
-pub(crate) fn add_const_portable(a: &[u32], c: u32, out: &mut [u32]) {
-    let n = a.len();
-    let mut i = 0;
-    let cv = Simd::<u32, LANES>::splat(c);
-    while i + LANES <= n {
-        let av = Simd::<u32, LANES>::from_slice(&a[i..i + LANES]);
-        (av + cv).copy_to_slice(&mut out[i..i + LANES]);
-        i += LANES;
+pub(crate) fn add_const_portable(values: &[u32], constant: u32, out: &mut [u32]) {
+    let constant_lanes = Simd::<u32, LANES>::splat(constant);
+    let len = values.len();
+    let mut idx = 0;
+    while idx + LANES <= values.len() {
+        let lanes = Simd::<u32, LANES>::from_slice(&values[idx..idx + LANES]);
+        (lanes + constant_lanes).copy_to_slice(&mut out[idx..idx + LANES]);
+        idx += LANES;
     }
-    while i < n {
-        out[i] = a[i].wrapping_add(c);
-        i += 1;
-    }
-}
-
-/// Generic binary SIMD loop: `out[i] = f(a[i], b[i])` over lane chunks + tail.
-#[inline]
-fn binary_loop(a: &[u32], b: &[u32], out: &mut [u32], f: impl Fn(Simd<u32, LANES>, Simd<u32, LANES>) -> Simd<u32, LANES>) {
-    debug_assert_eq!(a.len(), b.len());
-    debug_assert_eq!(a.len(), out.len());
-    let n = a.len();
-    let mut i = 0;
-    while i + LANES <= n {
-        let av = Simd::<u32, LANES>::from_slice(&a[i..i + LANES]);
-        let bv = Simd::<u32, LANES>::from_slice(&b[i..i + LANES]);
-        f(av, bv).copy_to_slice(&mut out[i..i + LANES]);
-        i += LANES;
-    }
-    while i < n {
-        out[i] = f(Simd::<u32, LANES>::splat(a[i]), Simd::<u32, LANES>::splat(b[i]))[0];
-        i += 1;
+    while idx < values.len() {
+        out[idx] = values[idx].wrapping_add(constant);
+        idx += 1;
     }
 }

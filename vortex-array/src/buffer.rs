@@ -277,7 +277,9 @@ impl BufferHandle {
     pub fn as_host_mut(&mut self) -> &mut ByteBuffer {
         match &mut self.0 {
             Inner::Host(buffer) => buffer,
-            _ => panic!("expected host buffer"),
+            // Upstream file, fork-modified: unreachable in practice (host-only
+            // check); panic! in production code is denied by clippy.
+            _ => unreachable!("expected host buffer: caller checked host_opt"),
         }
     }
 

@@ -5,12 +5,24 @@
 // sound arms — Constant rewrite, FoR ref-bump, Dict values-map — plus the
 // Primitive row loop). Every arm must decode equal to the canonical affine.
 
+
+// Integration-test crate: every fn is a test; the legacy session helper is
+// the established flatland test fixture.
+#![allow(clippy::tests_outside_test_module)]
+#![allow(clippy::disallowed_methods, reason = "legacy_session is the flatland test fixture")]
+#![allow(clippy::min_ident_chars, reason = "short names are idiomatic in test bodies")]
+
+
+#![allow(clippy::cast_possible_truncation, reason = "flatland u32-key convention in tests/benches")]
+#![allow(clippy::redundant_clone, reason = "test fixtures; clarity over micro-optimization")]
+
 use vortex_array::IntoArray;
 use vortex_array::VortexSessionExecute;
 use vortex_array::arrays::ConstantArray;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::arrays::primitive::PrimitiveArrayExt as _;
 use vortex_array::validity::Validity;
+use vortex_array::builders::dict::dict_encode;
 use vortex_error::VortexExpect as _;
 
 fn u32_arr(values: &[u32]) -> vortex_array::ArrayRef {
@@ -57,7 +69,7 @@ fn affine_for_add_is_ref_bump() {
 fn affine_dict_mul_maps_values() {
     let ctx = &mut vortex_array::legacy_session().create_execution_ctx();
     let keys = u32_arr(&[7, 9, 7, 9, 7]);
-    let dict = vortex_array::builders::dict::dict_encode(&keys, ctx).vortex_expect("dict");
+    let dict = dict_encode(&keys, ctx).vortex_expect("dict");
     let dict_arr = dict.into_array();
     assert!(
         dict_arr.is::<vortex_array::arrays::Dict>(),
@@ -74,7 +86,7 @@ fn affine_dict_mul_maps_values() {
 fn affine_dict_add_maps_values() {
     let ctx = &mut vortex_array::legacy_session().create_execution_ctx();
     let keys = u32_arr(&[10, 20, 10, 30]);
-    let dict = vortex_array::builders::dict::dict_encode(&keys, ctx).vortex_expect("dict");
+    let dict = dict_encode(&keys, ctx).vortex_expect("dict");
     let dict_arr = dict.into_array();
 
     let out = vortex_fastlanes::affine::affine(&dict_arr, 1, 5, ctx).vortex_expect("affine");

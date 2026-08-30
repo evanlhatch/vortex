@@ -101,6 +101,8 @@ pub fn sort_to_indices(arr: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<A
 
 /// The identity permutation `[0, 1, …, n)` as a non-nullable `u32` [`PrimitiveArray`].
 fn identity_indices(n: usize) -> ArrayRef {
+    // Sort indices are u32 by convention (flatland: ≤ 2^32 rows per column).
+    #[allow(clippy::cast_possible_truncation, reason = "sort indices are u32 by convention; n is a column length")]
     PrimitiveArray::from_iter((0..n).map(|i| i as u32)).into_array()
 }
 
@@ -129,9 +131,11 @@ fn radix_sort_indices_u32(values: &[u32]) -> Vec<u32> {
 /// `bit_width` is the native key width (32 or 64) so leading zero bytes above the key width are
 /// never scanned. The sort is stable: equal keys keep their original relative order.
 fn radix_sort_indices_core(values: &[u64], bit_width: u32) -> Vec<u32> {
-    let n = values.len();
-    let mut order: Vec<u32> = (0..n as u32).collect();
-    let mut tmp: Vec<u32> = vec![0; n];
+    let len = values.len();
+    // Row indices are u32 by convention (flatland: ≤ 2^32 rows per column).
+    #[allow(clippy::cast_possible_truncation, reason = "u32 row-index convention")]
+    let mut order: Vec<u32> = (0..len as u32).collect();
+    let mut tmp: Vec<u32> = vec![0; len];
 
     // Skip leading zero bytes: only iterate up to the highest byte that contains a set bit.
     // `top` is the bitwise-OR of all key values; for u32 keys widened to u64 the upper 32 bits are
@@ -183,11 +187,13 @@ fn sort_primitive_to_indices(
     let mask = array.validity()?.execute_mask(array.len(), ctx)?;
     let mut null_indices: Vec<u32> = Vec::new();
     let mut valid_indices: Vec<u32> = Vec::new();
-    for (i, is_valid) in mask.iter().enumerate() {
+    // Row indices are u32 by convention (flatland: ≤ 2^32 rows per column).
+    #[allow(clippy::cast_possible_truncation, reason = "u32 row-index convention")]
+    for (idx, is_valid) in mask.iter().enumerate() {
         if is_valid {
-            valid_indices.push(i as u32);
+            valid_indices.push(idx as u32);
         } else {
-            null_indices.push(i as u32);
+            null_indices.push(idx as u32);
         }
     }
 
@@ -246,16 +252,18 @@ fn sort_dict_to_indices(dict: DictArray, ctx: &mut ExecutionCtx) -> VortexResult
     let value_order = sort_to_indices(&values, ctx)?;
     let value_order = value_order.execute::<PrimitiveArray>(ctx)?;
 
-    // Inverse permutation: rank[original_value_pos] = position in sorted value_order.
     let values_len = values.len();
     let mut rank = vec![0u32; values_len];
     for (sorted_pos, &orig_pos) in value_order.as_slice::<u32>().iter().enumerate() {
-        rank[orig_pos as usize] = sorted_pos as u32;
+        // sorted_pos < values_len <= 2^32 (u32 row-index convention).
+        #[allow(clippy::cast_possible_truncation, reason = "u32 row-index convention")]
+        let rank_val = sorted_pos as u32;
+        rank[orig_pos as usize] = rank_val;
     }
 
     // Remap codes: key[i] = rank[codes[i]] + 1 for valid rows, 0 for null rows.
     // Null codes sort first (key 0), then rows by ascending value rank.
-    let codes_array = codes.clone().execute::<PrimitiveArray>(ctx)?;
+    let codes_array = codes.execute::<PrimitiveArray>(ctx)?;
     let codes_mask = codes_array.validity()?.execute_mask(n, ctx)?;
     let mut keys: Vec<u32> = Vec::with_capacity(n);
 
@@ -267,7 +275,11 @@ fn sort_dict_to_indices(dict: DictArray, ctx: &mut ExecutionCtx) -> VortexResult
                 .next()
                 .vortex_expect("code mask length must equal codes length");
             if is_valid {
-                keys.push(rank[*code as usize] + 1);
+                // Codes are u32-keyed by convention; the physical ptype may be
+                // narrower/wider but rank is indexed by the u32 code value.
+                #[allow(clippy::cast_possible_truncation, reason = "code values are u32-range by the dict-code convention")]
+                let code_idx = *code as usize;
+                keys.push(rank[code_idx] + 1);
             } else {
                 keys.push(0);
             }
@@ -301,6 +313,8 @@ mod tests {
     }
 
     fn stable_reference<T: PartialOrd + Copy>(values: &[T]) -> Vec<u32> {
+        // Test-only reference; u32 row-index convention.
+        #[allow(clippy::cast_possible_truncation, reason = "u32 row-index convention")]
         let mut order: Vec<u32> = (0..values.len() as u32).collect();
         order.sort_by(|&a, &b| {
             let (va, vb) = (values[a as usize], values[b as usize]);
@@ -362,8 +376,7 @@ mod tests {
 
     #[test]
     fn primitive_nulls_first() -> VortexResult<()> {
-        use crate::arrays::PrimitiveArray;
-        let arr = PrimitiveArray::from_option_iter([Some(3i32), None, Some(1i32), None, Some(2i32)])
+            let arr = PrimitiveArray::from_option_iter([Some(3i32), None, Some(1i32), None, Some(2i32)])
             .into_array();
         let mut ctx = array_session().create_execution_ctx();
         let idx = sort_to_indices(&arr, &mut ctx)?;
@@ -396,7 +409,7 @@ mod tests {
         let dict = DictArray::try_new(codes, values)?.into_array();
 
         let mut ctx = array_session().create_execution_ctx();
-        let idx = sort_to_indices(&dict.clone(), &mut ctx)?;
+        let idx = sort_to_indices(&dict, &mut ctx)?;
         let idx = idx.execute::<PrimitiveArray>(&mut ctx)?;
         assert_eq!(idx.as_slice::<u32>(), &[1, 4, 2, 0, 3]);
 

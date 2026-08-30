@@ -65,16 +65,16 @@ fn diff_for_same_ref(
     if !old.is::<FoR>() || !new.is::<FoR>() {
         return None;
     }
-    let o = old.clone().downcast::<FoR>();
-    let n = new.clone().downcast::<FoR>();
+    let old_for = old.clone().downcast::<FoR>();
+    let new_for = new.clone().downcast::<FoR>();
     // References must match exactly (dtype + value) for the children to be
     // comparable; PValue carries both, None on either side falls through.
-    let o_ref = o.reference_scalar().as_primitive().pvalue();
-    let n_ref = n.reference_scalar().as_primitive().pvalue();
-    if o_ref.is_none() || o_ref != n_ref {
+    let old_ref = old_for.reference_scalar().as_primitive().pvalue();
+    let new_ref = new_for.reference_scalar().as_primitive().pvalue();
+    if old_ref.is_none() || old_ref != new_ref {
         return None;
     }
-    let reference = match o_ref {
+    let reference = match old_ref {
         // Children are u32 (checked below), so the reference must be u32 —
         // any other width falls to the generic path.
         Some(PValue::U32(r)) => r,

@@ -5,6 +5,14 @@
 // dispatched tier — on an SVE-capable machine (this host: SVE2) the SVE
 // path executes; elsewhere the fallback runs. Both must be correct.
 
+
+// Integration-test crate: all fns are tests; short names idiomatic in tests.
+#![allow(clippy::tests_outside_test_module)]
+#![allow(clippy::min_ident_chars, reason = "short names are idiomatic in test bodies")]
+
+
+#![allow(clippy::cast_possible_truncation, reason = "flatland u32-key convention in tests/benches")]
+
 use vortex_buffer::sve;
 
 #[test]

@@ -3,9 +3,9 @@
 
 //! Varlen-access kernels (flatland REBUILD Part 3 #4, retiered).
 //!
-//! This module now covers ONLY the operations `std::simd` cannot express:
+//! This module covers ONLY the operations `std::simd` cannot express:
 //! indexed gather, indexed scatter, and varlen compaction (SVE2 `COMPACT`).
-//! One code path scales to the hardware vector length via
+//! Predicated loops scale to the hardware vector length via
 //! `svwhilelt`/`svcntw` — no fixed-width clones.
 //!
 //! Policy (Part 8, portable-default): **elementwise ops live in
@@ -17,12 +17,34 @@
 //! guaranteed) and scalar fallbacks. 8/16-bit gather has no SVE hardware
 //! instruction (Part 0): narrow keys stay scalar and schema should prefer
 //! u32 keys (already the convention).
+//!
+//! All SVE intrinsics sit behind `stdarch_aarch64_sve` (unstable, enabled
+//! crate-wide under `cfg(aarch64)`) and are only reachable after a runtime
+//! probe.
+//!
+// SVE register addressing casts block-local indices to the element width;
+// flatland blocks are <= 1024 values, so truncation is impossible.
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "flatland blocks are <= 1024 values; block-local indices cannot exceed u32"
+)]
+#![allow(
+    clippy::missing_transmute_annotations,
+    reason = "svcompact_s32 operates on signed lanes; the u32 payload is reinterpreted with identical lane layout"
+)]
 
 use crate::CpuKernel;
 
+/// Kernel shape: two u32 slices in, one out (gather/scatter).
+type U32Kernel2 = unsafe fn(&[u32], &[u32], &mut [u32]);
+/// Count kernel shape: keep lanes in, kept-row count out.
+type CountKernel = unsafe fn(&[u32]) -> usize;
+/// Compact kernel shape: source, keep mask, output pointer, capacity.
+type CompactKernel = unsafe fn(&[u32], &[u32], *mut u32, usize) -> usize;
+
 /// `out[i] = src[keys[i]]` over u32 lanes with u32 keys, best available tier.
 pub fn gather_u32(src: &[u32], keys: &[u32], out: &mut [u32]) {
-    static KERNEL: CpuKernel<unsafe fn(&[u32], &[u32], &mut [u32])> = CpuKernel::new(|| {
+    static KERNEL: CpuKernel<U32Kernel2> = CpuKernel::new(|| {
         #[cfg(target_arch = "aarch64")]
         {
             if std::arch::is_aarch64_feature_detected!("sve") {
@@ -41,7 +63,7 @@ pub fn gather_u32(src: &[u32], keys: &[u32], out: &mut [u32]) {
 
 /// `out[keys[i]] = vals[i]` over u32 lanes with u32 keys, best available tier.
 pub fn scatter_u32(keys: &[u32], vals: &[u32], out: &mut [u32]) {
-    static KERNEL: CpuKernel<unsafe fn(&[u32], &[u32], &mut [u32])> = CpuKernel::new(|| {
+    static KERNEL: CpuKernel<U32Kernel2> = CpuKernel::new(|| {
         #[cfg(target_arch = "aarch64")]
         {
             if std::arch::is_aarch64_feature_detected!("sve") {
@@ -80,15 +102,15 @@ unsafe fn gather_u32_sve(src: &[u32], keys: &[u32], out: &mut [u32]) {
     };
     unsafe {
         debug_assert_eq!(keys.len(), out.len());
-        let n = keys.len();
-        let (mut i, vl) = (0usize, svcntw() as usize);
-        let sp = src.as_ptr();
-        while i < n {
-            let pg = svwhilelt_b32_u32(i as u32, n as u32);
-            let ks = svld1_u32(pg, keys.as_ptr().add(i));
-            let vs = svld1_gather_u32index_u32(pg, sp, ks);
-            svst1_u32(pg, out.as_mut_ptr().add(i), vs);
-            i += vl;
+        let len = keys.len();
+        let (mut idx, step) = (0usize, svcntw() as usize);
+        let src_ptr = src.as_ptr();
+        while idx < len {
+            let pg = svwhilelt_b32_u32(idx as u32, len as u32);
+            let key_lanes = svld1_u32(pg, keys.as_ptr().add(idx));
+            let val_lanes = svld1_gather_u32index_u32(pg, src_ptr, key_lanes);
+            svst1_u32(pg, out.as_mut_ptr().add(idx), val_lanes);
+            idx += step;
         }
     }
 }
@@ -101,14 +123,14 @@ unsafe fn scatter_u32_sve(keys: &[u32], vals: &[u32], out: &mut [u32]) {
     };
     unsafe {
         debug_assert_eq!(keys.len(), vals.len());
-        let n = keys.len();
-        let (mut i, vl) = (0usize, svcntw() as usize);
-        while i < n {
-            let pg = svwhilelt_b32_u32(i as u32, n as u32);
-            let ks = svld1_u32(pg, keys.as_ptr().add(i));
-            let vs = svld1_u32(pg, vals.as_ptr().add(i));
-            svst1_scatter_u32index_u32(pg, out.as_mut_ptr(), ks, vs);
-            i += vl;
+        let len = keys.len();
+        let (mut idx, step) = (0usize, svcntw() as usize);
+        while idx < len {
+            let pg = svwhilelt_b32_u32(idx as u32, len as u32);
+            let key_lanes = svld1_u32(pg, keys.as_ptr().add(idx));
+            let val_lanes = svld1_u32(pg, vals.as_ptr().add(idx));
+            svst1_scatter_u32index_u32(pg, out.as_mut_ptr(), key_lanes, val_lanes);
+            idx += step;
         }
     }
 }
@@ -130,25 +152,26 @@ unsafe fn scatter_u32_neon(keys: &[u32], vals: &[u32], out: &mut [u32]) {
 }
 
 // =============================================================================
-// Portable scalar tiers (all architectures)
+// Portable scalar tiers (all architectures; varlen access only)
 // =============================================================================
 
 fn gather_u32_scalar(src: &[u32], keys: &[u32], out: &mut [u32]) {
-    for (o, &k) in out.iter_mut().zip(keys.iter()) {
-        *o = *src.get(k as usize).unwrap_or(&0);
+    for (slot, &key) in out.iter_mut().zip(keys.iter()) {
+        *slot = *src.get(key as usize).unwrap_or(&0);
     }
 }
 
 fn scatter_u32_scalar(keys: &[u32], vals: &[u32], out: &mut [u32]) {
-    for (&k, &v) in keys.iter().zip(vals.iter()) {
-        if let Some(slot) = out.get_mut(k as usize) {
-            *slot = v;
+    for (&key, &val) in keys.iter().zip(vals.iter()) {
+        if let Some(slot) = out.get_mut(key as usize) {
+            *slot = val;
         }
     }
 }
 
 // =============================================================================
-// Compaction filter (Part 3 #4; std::simd has no varlen compact)
+// Bitwise selectors + compaction filter (Part 3 #4; std::simd has no varlen
+// compact)
 // =============================================================================
 
 /// Element-wise bitwise op: `out[i] = a[i] op b[i]` (Not is unary).
@@ -193,7 +216,7 @@ pub fn filter_compact_u32(src: &[u32], keep: &[u32], out: &mut Vec<u32>) -> usiz
 
 /// Count nonzero lanes (for capacity planning) without compacting.
 pub fn compact_count_u32(keep: &[u32]) -> usize {
-    static KERNEL: CpuKernel<unsafe fn(&[u32]) -> usize> = CpuKernel::new(|| {
+    static KERNEL: CpuKernel<CountKernel> = CpuKernel::new(|| {
         #[cfg(target_arch = "aarch64")]
         {
             // COMPACT is an SVE2 instruction; probing only SVE would SIGILL
@@ -212,18 +235,17 @@ pub fn compact_count_u32(keep: &[u32]) -> usize {
 
 /// Write the kept lanes into the front of `out`; returns rows written.
 fn compact_into(src: &[u32], keep: &[u32], out: &mut Vec<u32>) -> usize {
-    static KERNEL: CpuKernel<unsafe fn(&[u32], &[u32], *mut u32, usize) -> usize> =
-        CpuKernel::new(|| {
-            #[cfg(target_arch = "aarch64")]
-            {
-                if std::arch::is_aarch64_feature_detected!("sve2") {
-                    return compact_into_u32_sve;
-                }
-                return compact_into_u32_neon;
+    static KERNEL: CpuKernel<CompactKernel> = CpuKernel::new(|| {
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("sve2") {
+                return compact_into_u32_sve;
             }
-            #[allow(unreachable_code)]
-            compact_into_u32_scalar
-        });
+            return compact_into_u32_neon;
+        }
+        #[allow(unreachable_code)]
+        compact_into_u32_scalar
+    });
     // SAFETY: `out` is assumed to have capacity >= src.len() (caller reserved
     // with the count pre-pass); the kernel writes at most `capacity` rows.
     let cap = out.capacity();
@@ -240,13 +262,14 @@ unsafe fn compact_count_u32_sve(keep: &[u32]) -> usize {
         svcmpeq_u32, svcntp_b32, svcntw, svdup_n_u32, svld1_u32, svnot_b_z, svwhilelt_b32_u32,
     };
     unsafe {
-        let (mut i, mut count, vl) = (0usize, 0usize, svcntw() as usize);
+        let (mut idx, mut count, step) = (0usize, 0usize, svcntw() as usize);
         let zero = svdup_n_u32(0);
-        while i < keep.len() {
-            let pg = svwhilelt_b32_u32(i as u32, keep.len() as u32);
-            let nonzero = svnot_b_z(pg, svcmpeq_u32(pg, svld1_u32(pg, keep.as_ptr().add(i)), zero));
+        while idx < keep.len() {
+            let pg = svwhilelt_b32_u32(idx as u32, keep.len() as u32);
+            let nonzero =
+                svnot_b_z(pg, svcmpeq_u32(pg, svld1_u32(pg, keep.as_ptr().add(idx)), zero));
             count += svcntp_b32(pg, nonzero) as usize;
-            i += vl;
+            idx += step;
         }
         count
     }
@@ -256,31 +279,37 @@ unsafe fn compact_count_u32_sve(keep: &[u32]) -> usize {
 #[target_feature(enable = "sve2")]
 unsafe fn compact_into_u32_sve(src: &[u32], keep: &[u32], out: *mut u32, cap: usize) -> usize {
     use std::arch::aarch64::{
-        svcmpeq_u32, svcntp_b32, svcntw, svcompact_s32, svdup_n_u32, svld1_u32, svnot_b_z,
-        svptrue_b32, svst1_u32, svwhilelt_b32_u32,
+        svcmpeq_u32, svcntp_b32, svcntw, svcompact_s32, svdup_n_u32, svint32_t, svld1_u32,
+        svnot_b_z, svptrue_b32, svst1_u32, svuint32_t, svwhilelt_b32_u32,
     };
     unsafe {
         let _ = cap;
-        let (mut i, mut w, vl) = (0usize, 0usize, svcntw() as usize);
-        // The predicate's true-count comes from the count tier; we compact and
-        // append into the output pointer, tracking `w` via per-iter counts.
-        while i < src.len() {
-            let pg = svwhilelt_b32_u32(i as u32, src.len() as u32);
-            let v = svld1_u32(pg, src.as_ptr().add(i));
-            let keepv = svld1_u32(pg, keep.as_ptr().add(i));
-            let nonzero = svnot_b_z(pg, svcmpeq_u32(pg, keepv, svdup_n_u32(0)));
-            let n_kept = svcntp_b32(pg, nonzero) as usize;
-            if n_kept > 0 {
-                let compacted = svcompact_s32(nonzero, std::mem::transmute(v));
-                svst1_u32(svptrue_b32(), out.add(w), std::mem::transmute(compacted));
-                w += n_kept;
+        let (mut idx, mut written, step) = (0usize, 0usize, svcntw() as usize);
+        while idx < src.len() {
+            let pg = svwhilelt_b32_u32(idx as u32, src.len() as u32);
+            let value_lanes = svld1_u32(pg, src.as_ptr().add(idx));
+            let keep_lanes = svld1_u32(pg, keep.as_ptr().add(idx));
+            let nonzero = svnot_b_z(pg, svcmpeq_u32(pg, keep_lanes, svdup_n_u32(0)));
+            let kept_here = svcntp_b32(pg, nonzero) as usize;
+            if kept_here > 0 {
+                // svcompact_s32 operates on signed lanes; the u32 payload is
+                // reinterpreted with identical lane layout.
+                let compacted: svint32_t = svcompact_s32(
+                    nonzero,
+                    std::mem::transmute::<svuint32_t, svint32_t>(value_lanes),
+                );
+                svst1_u32(
+                    svptrue_b32(),
+                    out.add(written),
+                    std::mem::transmute::<svint32_t, svuint32_t>(compacted),
+                );
+                written += kept_here;
             }
-            i += vl;
+            idx += step;
         }
-        w
+        written
     }
 }
-
 
 // ---- NEON tiers ---------------------------------------------------------
 
@@ -304,15 +333,15 @@ fn compact_count_u32_scalar(keep: &[u32]) -> usize {
 
 fn compact_into_u32_scalar(src: &[u32], keep: &[u32], out: *mut u32, cap: usize) -> usize {
     assert_eq!(src.len(), keep.len());
-    let mut w = 0usize;
-    for (i, &k) in keep.iter().enumerate() {
-        if k != 0 {
-            if w >= cap {
+    let mut written = 0usize;
+    for (idx, &keep_flag) in keep.iter().enumerate() {
+        if keep_flag != 0 {
+            if written >= cap {
                 break; // safety net; caller pre-reserved
             }
-            unsafe { *out.add(w) = src[i] };
-            w += 1;
+            unsafe { *out.add(written) = src[idx] };
+            written += 1;
         }
     }
-    w
+    written
 }

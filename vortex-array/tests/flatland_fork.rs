@@ -3,16 +3,26 @@
 //
 // Tests for the flatland fork additions (REBUILD Part 3 #1, #2, #5, #6, #7, #8).
 
+
+// Integration-test crate: every fn is a test; the legacy session helper is
+// the established flatland test fixture.
+#![allow(clippy::tests_outside_test_module)]
+#![allow(clippy::disallowed_methods, reason = "legacy_session is the flatland test fixture")]
+#![allow(clippy::many_single_char_names, reason = "a/b/o fixtures are idiomatic in merge/diff test loops")]
+#![allow(clippy::cast_possible_truncation, reason = "flatland u32-key convention in test data")]
+#![allow(clippy::redundant_clone, reason = "test fixtures; clarity over micro-optimization")]
+#![allow(clippy::absolute_paths, reason = "test file uses fully-qualified upstream paths for rebase clarity")]
+#![allow(clippy::bool_assert_comparison, reason = "is_some() == true reads clearer in property loops")]
+
 use vortex_array::IntoArray;
 use vortex_array::arrays::PrimitiveArray;
 use vortex_array::flatland::verbs;
-use vortex_array::expr::stats::{Precision, Stat, StatsProvider};
 use vortex_array::patches::Patches;
 use vortex_array::scalar::{PValue, Scalar, ScalarValue};
 use vortex_array::validity::Validity;
 use vortex_array::VortexSessionExecute;
 use vortex_array::dtype::Nullability;
-use vortex_array::patches::Patches as _;
+use vortex_array::expr::stats::{Precision, Stat, StatsProvider};
 use vortex_error::VortexExpect as _;
 use vortex_mask::Mask;
 

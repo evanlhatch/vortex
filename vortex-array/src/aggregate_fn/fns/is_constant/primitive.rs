@@ -20,15 +20,19 @@ pub fn compute_is_constant<T: NativePType, const WIDTH: usize>(values: &[T]) -> 
     let first_value = values[0];
     let first_vec = &[first_value; WIDTH];
 
-    let mut chunks = values[1..].chunks_exact(WIDTH);
-    for chunk in &mut chunks {
+    // Fixed WIDTH (a compile-time constant); `chunks` would not const-fold.
+    #[allow(clippy::manual_div_ceil, reason = "not applicable")]
+    // as_chunks (newer std API) is the clippy-preferred form; slice_chunks
+    // returns (&[[T; WIDTH]], remainder).
+    let (chunks, _remainder) = values[1..].as_chunks::<WIDTH>();
+    for chunk in chunks {
         assert_eq!(chunk.len(), WIDTH); // let the compiler know each chunk is WIDTH.
         if first_vec != chunk {
             return false;
         }
     }
 
-    for value in chunks.remainder() {
+    for value in _remainder {
         if !value.is_eq(first_value) {
             return false;
         }

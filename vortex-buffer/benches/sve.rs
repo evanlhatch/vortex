@@ -11,6 +11,13 @@
 // donation). Setup (output buffer alloc) is identical on both sides, so
 // the ratio is a valid parity comparison.
 
+
+// Bench crate: short bench-loop names are idiomatic.
+#![allow(clippy::min_ident_chars, reason = "short names idiomatic in bench loops")]
+
+
+#![allow(clippy::cast_possible_truncation, reason = "flatland u32-key convention in tests/benches")]
+
 use std::hint::black_box;
 
 use divan::Bencher;
@@ -148,37 +155,37 @@ fn bitwise_inputs() -> (Vec<u32>, Vec<u32>) {
 
 #[divan::bench]
 fn and_dispatched(b: Bencher) {
-    let (a, c) = bitwise_inputs();
+    let (lhs, rhs) = bitwise_inputs();
     b.bench(|| {
         let mut out = vec![0u32; N];
-        sve::bitwise_u32(sve::BitwiseOp::And, black_box(&a), black_box(&c), black_box(&mut out));
+        sve::bitwise_u32(sve::BitwiseOp::And, black_box(&lhs), black_box(&rhs), black_box(&mut out));
     });
 }
 
 #[divan::bench]
 fn and_portable_direct(b: Bencher) {
-    let (a, c) = bitwise_inputs();
+    let (lhs, rhs) = bitwise_inputs();
     b.bench(|| {
         let mut out = vec![0u32; N];
-        vortex_buffer::portable::and_u32(black_box(&a), black_box(&c), black_box(&mut out));
+        vortex_buffer::portable::and_u32(black_box(&lhs), black_box(&rhs), black_box(&mut out));
     });
 }
 
 #[divan::bench]
 fn xor_dispatched(b: Bencher) {
-    let (a, c) = bitwise_inputs();
+    let (lhs, rhs) = bitwise_inputs();
     b.bench(|| {
         let mut out = vec![0u32; N];
-        sve::bitwise_u32(sve::BitwiseOp::Xor, black_box(&a), black_box(&c), black_box(&mut out));
+        sve::bitwise_u32(sve::BitwiseOp::Xor, black_box(&lhs), black_box(&rhs), black_box(&mut out));
     });
 }
 
 #[divan::bench]
 fn not_dispatched(b: Bencher) {
-    let (a, _) = bitwise_inputs();
+    let (lhs, _) = bitwise_inputs();
     b.bench(|| {
         let mut out = vec![0u32; N];
-        sve::bitwise_u32(sve::BitwiseOp::Not, black_box(&a), black_box(&a), black_box(&mut out));
+        sve::bitwise_u32(sve::BitwiseOp::Not, black_box(&lhs), black_box(&lhs), black_box(&mut out));
     });
 }
 
@@ -190,10 +197,10 @@ fn and_scalar_direct(a: &[u32], c: &[u32], out: &mut [u32]) {
 
 #[divan::bench]
 fn and_scalar_direct_bench(b: Bencher) {
-    let (a, c) = bitwise_inputs();
+    let (lhs, rhs) = bitwise_inputs();
     b.bench(|| {
         let mut out = vec![0u32; N];
-        and_scalar_direct(black_box(&a), black_box(&c), black_box(&mut out));
+        and_scalar_direct(black_box(&lhs), black_box(&rhs), black_box(&mut out));
     });
 }
 
@@ -202,7 +209,7 @@ fn and_scalar_direct_bench(b: Bencher) {
 fn keep_inputs() -> (Vec<u32>, Vec<u32>) {
     let src = gen_u32(N);
     // ~50% keep rate, mixed lanes.
-    let keep: Vec<u32> = (0..N as u32).map(|i| (i * 2654435761 >> 13) % 2).collect();
+    let keep: Vec<u32> = (0..N as u32).map(|i| ((i * 2654435761) >> 13) % 2).collect();
     (src, keep)
 }
 

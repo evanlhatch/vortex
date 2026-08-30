@@ -1,12 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright the Vortex contributors
-
-//! Flatland fork verbs (REBUILD Part 3 #5, #6, #7): change detection, indexed
-//! write, and grouping as first-class array operations.
-//!
 //! Placement note: the REBUILD sketch put these in vortex-compute, but 0.85's
 //! vortex-compute is a buffer/lane-level crate with no ArrayRef dependency —
 //! array-level verbs live here instead.
+//
+// Row indices are u32 by the flatland convention (≤ 2^32 rows per column);
+// usize→u32 narrowing at module scope is the documented convention, not a
+// possible truncation bug.
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "flatland convention: row indices are u32; column lengths never exceed 2^32"
+)]
 
 use vortex_error::vortex_err;
 use vortex_error::VortexResult;
@@ -80,7 +82,7 @@ pub fn diff(old: &ArrayRef, new: &ArrayRef, ctx: &mut ExecutionCtx) -> VortexRes
 
     let indices: Vec<u32> = match mask.indices() {
         AllOr::All => (0..new.len() as u32).collect(),
-        AllOr::Some(idx) => idx.iter().map(|&i| i as u32).collect(),
+        AllOr::Some(indices) => indices.iter().map(|&idx| idx as u32).collect(),
         AllOr::None => unreachable!("handled above"),
     };
 
@@ -121,7 +123,7 @@ pub fn diff_fast_path(old: &ArrayRef, new: &ArrayRef) -> Option<Patches> {
         .iter()
         .enumerate()
         .filter(|(_, l)| **l != 0)
-        .map(|(i, _)| i as u32)
+        .map(|(idx, _)| idx as u32)
         .collect();
 
     // SVE gather of the changed values straight out of `new`.
@@ -198,11 +200,15 @@ pub fn scatter_in_place(
 
     // Fast path: uniquely-owned buffer — in-place writes. u32 target uses the
     // SVE scatter tier; other ptypes use the scalar loop.
-    if ptype == PType::U32 {
-        if let Some(mut guard) = target.try_buffer_mut::<u32>() {
-            vortex_buffer::sve::scatter_u32(idx_slice, values_arr.as_slice::<u32>(), guard.as_mut_slice());
-            return Ok(());
-        }
+    if ptype == PType::U32
+        && let Some(mut guard) = target.try_buffer_mut::<u32>()
+    {
+        vortex_buffer::sve::scatter_u32(
+            idx_slice,
+            values_arr.as_slice::<u32>(),
+            guard.as_mut_slice(),
+        );
+        return Ok(());
     }
     let mut written = false;
     match_each_native_ptype!(ptype, |T| {
@@ -242,11 +248,11 @@ fn rebase_scatter(
 
     match_each_native_ptype!(ptype, |T| {
         let mut out = base.as_slice::<T>().to_vec();
-        let vals = values_arr.as_slice::<T>().to_vec();
+        let vals = values_arr.as_slice::<T>();
         for (slot, &i) in idx.iter().enumerate() {
             out[i as usize] = vals[slot];
         }
-        *target = PrimitiveArray::new(out, validity.clone()).into_array();
+        *target = PrimitiveArray::new(out, validity).into_array();
     });
     Ok(())
 }

@@ -654,11 +654,12 @@ where
         // where is_unique() returns true when ref_cnt == 1 — enabling zero-copy
         // try_into_mut(). Bytes::from_owner() uses the Owned vtable where
         // is_unique() ALWAYS returns false, forcing a clone on every mutation.
+        // ManuallyDrop suppresses Vec's destructor (same heap allocation moves
+        // into the u8 view) without `mem::forget` on the Drop type.
+        let value = &mut std::mem::ManuallyDrop::new(value);
         let ptr = value.as_mut_ptr() as *mut u8;
         let len = value.len() * size_of::<T>();
         let cap = value.capacity() * size_of::<T>();
-        // Prevent Vec<T>'s destructor from freeing the allocation.
-        std::mem::forget(value);
         // SAFETY: ptr came from a valid Vec<T> allocation; len/cap are the byte
         // equivalents; alignment of u8 (1) is satisfied by any pointer.
         let vec_bytes: Vec<u8> = unsafe { Vec::from_raw_parts(ptr, len, cap) };

@@ -303,7 +303,7 @@ impl Patches {
     /// `offset_within_chunk = None` — the common case for Flatland's
     /// single-chunk patches.
     ///
-    /// # Safety (caller guarantees)
+    /// # Safety
     ///
     /// * Indices and values have the same length
     /// * Indices is a non-nullable unsigned integer type
@@ -331,6 +331,7 @@ impl Patches {
     /// Works on flat patches (no chunk_offsets). For chunked patches, returns None.
     /// Both value arrays must share a primitive ptype — the value merge is
     /// monomorphized over it; on a ptype mismatch, returns None.
+    #[allow(clippy::cognitive_complexity, reason = "sorted-index union kernel; complexity is the monomorphized merge itself")]
     pub fn try_merge(&mut self, other: &Self) -> Option<()> {
         // Only supports flat patches (no chunk_offsets)
         if self.chunk_offsets.is_some() || other.chunk_offsets.is_some() {
@@ -392,16 +393,13 @@ impl Patches {
 
     /// In-place merge: identical semantics to [`Self::try_merge`] (sorted-index
     /// union, last-write-wins, flat patches only) but reuses self's index and
-    /// value buffers when uniquely owned — zero allocation on the flatland
-    /// overlay hot path (REBUILD Part 3 #2).
-    ///
     /// Returns `None` (caller falls back to [`try_merge`]) when either buffer
     /// is shared, indices are not u32, or value ptypes differ.
     ///
-    /// SAFETY: backward merge writes position `w` only after consuming inputs
-    /// ahead of it (`w > i && w > j` invariant), so unread source bytes are
-    /// never clobbered; `set_len` runs after the full merged output is written
-    /// into reserved capacity.
+    /// Complexity is inherent to the backward merge; suppressing the lint
+    /// rather than fragmenting the hot-path kernel.
+    #[allow(clippy::too_many_lines, reason = "single monomorphized merge kernel; splitting would duplicate the unsafe body")]
+    #[allow(clippy::cognitive_complexity, reason = "merge kernels are linear control flow by design; extraction would hurt the hot path")]
     pub fn merge_in_place(&mut self, other: &Self) -> Option<()> {
         use crate::arrays::Primitive;
         if self.chunk_offsets.is_some() || other.chunk_offsets.is_some() {
@@ -415,70 +413,81 @@ impl Patches {
         {
             return None;
         }
-        let ol: &[u32] = other_indices.as_slice::<u32>();
-        let m = ol.len();
+        let other_lanes: &[u32] = other_indices.as_slice::<u32>();
+        let other_count = other_lanes.len();
         let merged_len = {
             let mut idx_guard = self.indices.try_buffer_mut::<u32>()?;
-            idx_guard.reserve(m);
+            idx_guard.reserve(other_count);
 
         let (total, dups) = match_each_native_ptype!(other_values.ptype(), |T| {
-            let ov: &[T] = other_values.as_slice::<T>();
+            let other_val_slice: &[T] = other_values.as_slice::<T>();
             let mut val_guard = self.values.try_buffer_mut::<T>()?;
-            val_guard.reserve(m);
+            val_guard.reserve(other_count);
 
-            let n = idx_guard.len();
-            let total = n + m;
+            let self_len = idx_guard.len();
+            let total = self_len + other_count;
             unsafe {
                 // SAFETY: slices cover exactly the initialized prefix; raw
                 // pointers stay valid (reserve happened before, no realloc after).
-                let slp = std::slice::from_raw_parts(idx_guard.as_ptr(), n);
-                let svp = std::slice::from_raw_parts(val_guard.as_ptr(), n);
-                let ip = idx_guard.as_mut_ptr();
-                let vp = val_guard.as_mut_ptr();
-                // Invariant: w > i && w > j — writes never clobber unread inputs.
-                let (mut i, mut j, mut w) = (n, m, total);
-                while i > 0 && j > 0 {
-                    w -= 1;
-                    match slp[i - 1].cmp(&ol[j - 1]) {
+                let self_idx_slice: &[u32] =
+                    std::slice::from_raw_parts(idx_guard.as_ptr(), self_len);
+                let self_val_slice: &[T] =
+                    std::slice::from_raw_parts(val_guard.as_ptr(), self_len);
+                let idx_out = idx_guard.as_mut_ptr();
+                let val_out = val_guard.as_mut_ptr();
+                // Invariant: write cursor trails both read cursors — writes
+                // never clobber unread inputs.
+                let (mut self_pos, mut other_pos, mut out_pos) = (self_len, other_count, total);
+                while self_pos > 0 && other_pos > 0 {
+                    out_pos -= 1;
+                    match self_idx_slice[self_pos - 1].cmp(&other_lanes[other_pos - 1]) {
                         Ordering::Equal => {
                             // Last-write-wins: drop self's row, take other's.
-                            i -= 1;
-                            j -= 1;
-                            *ip.add(w) = ol[j];
-                            *vp.add(w) = ov[j];
+                            self_pos -= 1;
+                            other_pos -= 1;
+                            *idx_out.add(out_pos) = other_lanes[other_pos];
+                            *val_out.add(out_pos) = other_val_slice[other_pos];
                         }
                         Ordering::Greater => {
-                            i -= 1;
-                            *ip.add(w) = slp[i];
-                            *vp.add(w) = svp[i];
+                            self_pos -= 1;
+                            *idx_out.add(out_pos) = self_idx_slice[self_pos];
+                            *val_out.add(out_pos) = self_val_slice[self_pos];
                         }
                         Ordering::Less => {
-                            j -= 1;
-                            *ip.add(w) = ol[j];
-                            *vp.add(w) = ov[j];
+                            other_pos -= 1;
+                            *idx_out.add(out_pos) = other_lanes[other_pos];
+                            *val_out.add(out_pos) = other_val_slice[other_pos];
                         }
                     }
                 }
-                if j == 0 {
+                if other_pos == 0 {
                     // Remaining self prefix: overlapping block-copy behind cursor
                     // (dst < src, so forward copy is correct).
-                    std::ptr::copy(ip, ip.add(w - i), i);
-                    std::ptr::copy(vp, vp.add(w - i), i);
-                    w -= i;
+                    std::ptr::copy(idx_out, idx_out.add(out_pos - self_pos), self_pos);
+                    std::ptr::copy(val_out, val_out.add(out_pos - self_pos), self_pos);
+                    out_pos -= self_pos;
                 } else {
-                    std::ptr::copy_nonoverlapping(ol.as_ptr(), ip.add(w - j), j);
-                    std::ptr::copy_nonoverlapping(ov.as_ptr(), vp.add(w - j), j);
-                    w -= j;
+                    std::ptr::copy_nonoverlapping(
+                        other_lanes.as_ptr(),
+                        idx_out.add(out_pos - other_pos),
+                        other_pos,
+                    );
+                    std::ptr::copy_nonoverlapping(
+                        other_val_slice.as_ptr(),
+                        val_out.add(out_pos - other_pos),
+                        other_pos,
+                    );
+                    out_pos -= other_pos;
                 }
-                debug_assert!(w <= n); // w == number of collapsed duplicates
-                if w > 0 {
+                debug_assert!(out_pos <= self_len); // out_pos == collapsed duplicates
+                if out_pos > 0 {
                     // Compact: shift merged region down over the duplicate holes.
-                    std::ptr::copy(ip.add(w), ip, total - w);
-                    std::ptr::copy(vp.add(w), vp, total - w);
+                    std::ptr::copy(idx_out.add(out_pos), idx_out, total - out_pos);
+                    std::ptr::copy(val_out.add(out_pos), val_out, total - out_pos);
                 }
-                idx_guard.set_len(total - w);
-                val_guard.set_len(total - w);
-                (total, w)
+                idx_guard.set_len(total - out_pos);
+                val_guard.set_len(total - out_pos);
+                (total, out_pos)
             }
         });
             total - dups
@@ -501,7 +510,7 @@ impl Patches {
     /// This is the Flatland hot-path constructor — called for every overlay
     /// where indices and values are known-valid PrimitiveArrays.
     ///
-    /// # Safety (caller guarantees)
+    /// # Safety
     ///
     /// * `indices.len() == values.len()`
     /// * `indices` is a non-nullable unsigned integer PrimitiveArray

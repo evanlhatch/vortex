@@ -29,6 +29,10 @@ impl<I: Iterator> Iterator for TrustedLenAdapter<I> {
     type Item = I::Item;
 
     #[inline]
+    // Upstream 0.85 file; newer clippy flags the match as a manual `Option::map`.
+    // The match is intentional (the two arms carry distinct debug-assert side
+    // effects), so the lint is suppressed here rather than restructured.
+    #[allow(clippy::manual_map, reason = "arms carry debug-assert side effects; Option::map would obscure the debug bookkeeping")]
     fn next(&mut self) -> Option<Self::Item> {
         match self.inner.next() {
             None => {

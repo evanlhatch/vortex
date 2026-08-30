@@ -7,6 +7,10 @@
 //
 //     cargo bench -p vortex-fastlanes --bench unpack
 
+
+#![allow(clippy::cast_possible_truncation, reason = "flatland u32-key convention in tests/benches")]
+#![allow(clippy::redundant_clone, reason = "test fixtures; clarity over micro-optimization")]
+
 use std::hint::black_box;
 
 use divan::Bencher;

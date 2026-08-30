@@ -160,7 +160,7 @@ pub fn affine(
                 .iter()
                 .map(|&v| v.wrapping_mul(f).wrapping_add(b))
                 .collect();
-            PrimitiveArray::new(out, validity.clone())
+            PrimitiveArray::new(out, validity)
         });
         return Ok(out.into_array());
     }
@@ -175,7 +175,7 @@ pub fn affine(
 /// Arithmetic in i64 with checked narrowing — overflow of the ptype range is
 /// an error, never a silent wrap.
 fn affine_pvalue(pv: PValue, factor: i64, base: i64) -> VortexResult<PValue> {
-    let v: i64 = pvalue_to_i64(pv.clone())?;
+    let v: i64 = pvalue_to_i64(pv)?;
     let r = v
         .checked_mul(factor)
         .and_then(|x| x.checked_add(base))

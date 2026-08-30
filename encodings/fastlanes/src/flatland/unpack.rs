@@ -30,6 +30,9 @@ const ROWS: usize = 32;
 const LANES: usize = 32;
 const BLOCK: usize = 1024;
 
+/// Kernel shape: packed words + width in, decoded block out.
+type UnpackKernel = unsafe fn(&[u32], usize, &mut [u32; BLOCK]);
+
 /// Unpack `out.len()` values from FastLanes-packed u32 words.
 ///
 /// `packed` must hold `ceil(out.len()/1024) * 32 * bit_width / 4` words
@@ -47,7 +50,7 @@ pub fn unpack_u32(packed: &[u32], bit_width: u8, out: &mut [u32]) {
         bit_width
     );
 
-    static KERNEL: CpuKernel<unsafe fn(&[u32], usize, &mut [u32; BLOCK])> = CpuKernel::new(|| {
+    static KERNEL: CpuKernel<UnpackKernel> = CpuKernel::new(|| {
         #[cfg(target_arch = "aarch64")]
         {
             if std::arch::is_aarch64_feature_detected!("sve") {
@@ -63,8 +66,13 @@ pub fn unpack_u32(packed: &[u32], bit_width: u8, out: &mut [u32]) {
         let words = &packed[block * words_per_block..][..words_per_block];
         // SAFETY: the selector probed the required feature; both tiers write
         // exactly BLOCK values from words_per_block packed words.
-        let out_block: &mut [u32; BLOCK] =
-            (&mut out[block * BLOCK..][..BLOCK]).try_into().unwrap();
+        let out_block: &mut [u32; BLOCK] = {
+            // Infallible by construction: the slice is exactly BLOCK long.
+            let Ok(block) = (&mut out[block * BLOCK..][..BLOCK]).try_into() else {
+                unreachable!("out block slice is exactly BLOCK long")
+            };
+            block
+        };
         unsafe { (KERNEL.get())(words, bit_width as usize, out_block) };
     }
     let tail = out.len() % BLOCK;
@@ -86,7 +94,18 @@ pub fn unpack_block_u32_fastlanes(packed: &[u32], width: usize, out: &mut [u32; 
 }
 
 /// SVE tier: lane-vectorized FastLanes unpack, no gathers. `pub unsafe` for
-/// the tier-parity tests/benches; callers must uphold the block contract.
+/// the tier-parity tests/benches.
+///
+/// # Safety (caller guarantees)
+///
+/// * `packed.len() == 32 * width` (a whole FastLanes block at `width`)
+/// * `out.len() == BLOCK` (1024)
+/// * runtime SVE feature detected (the dispatcher probes before selecting
+///   this tier)
+///
+/// # Safety
+///
+/// See the caller guarantees above.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "sve")]
 pub unsafe fn unpack_block_u32_sve(packed: &[u32], width: usize, out: &mut [u32; BLOCK]) {

@@ -91,10 +91,7 @@ unsafe impl<T: NativePType> RawParts<T> for Primitive {
     type Parts<'a> = PrimitiveParts<'a, T>;
     fn raw_parts<'a>(array: &'a ArrayRef) -> Option<Self::Parts<'a>> {
         let data = typed_data::<Primitive>(array)?;
-        if data.ptype() != T::PTYPE {
-            return None;
-        }
-        if data.buffer_handle().as_host_opt().is_none() {
+        if data.ptype() != T::PTYPE || data.buffer_handle().as_host_opt().is_none() {
             return None;
         }
         Some(PrimitiveParts {
@@ -210,7 +207,6 @@ pub struct ChunkedParts<'a> {
 unsafe impl<T: NativePType> RawParts<T> for crate::arrays::Chunked {
     type Parts<'a> = ChunkedParts<'a>;
     fn raw_parts<'a>(array: &'a ArrayRef) -> Option<Self::Parts<'a>> {
-        use crate::arrays::chunked::ChunkedArrayExt as _;
         if array.dtype() != &T::dtype_of() {
             return None;
         }

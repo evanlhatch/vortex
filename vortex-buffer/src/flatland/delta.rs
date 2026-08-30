@@ -4,10 +4,11 @@
 //! Dense delta overlay (flatland REBUILD Part 17.1, scope-trimmed).
 //!
 //! [`DeltaBuffer`] is the fork-native shape that matches the engine's hot
-//! SmallVec semantics with a plain buffer: a dense presence [`BitBufferMut`]
-//! + raw value [`BufferMut`]. The hot delta is NEVER an encoded `ArrayRef`
-//! (REBUILD Part 17.0 guardrail #1) — this is the buffer form; the encoded
-//! array exists only at the consumer/materialization bridge.
+//! SmallVec semantics with a plain buffer: a dense presence
+//! [`BitBufferMut`] plus raw value [`BufferMut`]. The hot delta is NEVER an
+//! encoded `ArrayRef` (REBUILD Part 17.0 guardrail #1) — this is the buffer
+//! form; the encoded array exists only at the consumer/materialization
+//! bridge.
 //!
 //! Write = bit-set + value write (O(1), no alloc under capacity, last-write-
 //! wins). Read-merge = branchless `blend(density[i], delta[i], base[i])` with
