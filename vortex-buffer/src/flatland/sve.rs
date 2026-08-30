@@ -50,11 +50,8 @@ pub fn gather_u32(src: &[u32], keys: &[u32], out: &mut [u32]) {
             if std::arch::is_aarch64_feature_detected!("sve") {
                 return gather_u32_sve;
             }
-            return gather_u32_neon;
         }
-        // Portable tail (x86 etc.): the unsafe fn pointer accepts a safe fn.
-        #[allow(unreachable_code)]
-        gather_u32_scalar
+        super::portable::gather_u32_portable as U32Kernel2
     });
     // SAFETY: the selector probed the required feature for the chosen tier;
     // arguments are valid slices and every tier computes the same mapping.
@@ -69,10 +66,8 @@ pub fn scatter_u32(keys: &[u32], vals: &[u32], out: &mut [u32]) {
             if std::arch::is_aarch64_feature_detected!("sve") {
                 return scatter_u32_sve;
             }
-            return scatter_u32_neon;
         }
-        #[allow(unreachable_code)]
-        scatter_u32_scalar
+        super::portable::scatter_u32_portable as U32Kernel2
     });
     // SAFETY: selector probed features; every tier writes `out[keys[i]] = vals[i]`.
     unsafe { (KERNEL.get())(keys, vals, out) }
@@ -145,35 +140,9 @@ unsafe fn scatter_u32_sve(keys: &[u32], vals: &[u32], out: &mut [u32]) {
 // NEON tiers (aarch64 baseline; std::simd has no gather/scatter/compact)
 // =============================================================================
 
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn gather_u32_neon(src: &[u32], keys: &[u32], out: &mut [u32]) {
-    gather_u32_scalar(src, keys, out)
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn scatter_u32_neon(keys: &[u32], vals: &[u32], out: &mut [u32]) {
-    scatter_u32_scalar(keys, vals, out)
-}
-
 // =============================================================================
 // Portable scalar tiers (all architectures; varlen access only)
 // =============================================================================
-
-fn gather_u32_scalar(src: &[u32], keys: &[u32], out: &mut [u32]) {
-    for (slot, &key) in out.iter_mut().zip(keys.iter()) {
-        *slot = *src.get(key as usize).unwrap_or(&0);
-    }
-}
-
-fn scatter_u32_scalar(keys: &[u32], vals: &[u32], out: &mut [u32]) {
-    for (&key, &val) in keys.iter().zip(vals.iter()) {
-        if let Some(slot) = out.get_mut(key as usize) {
-            *slot = val;
-        }
-    }
-}
 
 // =============================================================================
 // Bitwise selectors + compaction filter (Part 3 #4; std::simd has no varlen

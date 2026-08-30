@@ -18,6 +18,7 @@
 
 use std::simd::cmp::SimdPartialEq;
 use std::simd::Simd;
+use std::simd::Mask;
 use std::simd::Select;
 
 use crate::CpuKernel;
@@ -234,4 +235,51 @@ pub fn neq_indices_u32(a: &[u32], b: &[u32], out: &mut Vec<u32>) -> usize {
         idx += 1;
     }
     written
+}
+
+// =============================================================================
+// Portable gather/scatter (Part 3 #4 upgrade — replaces the scalar fallbacks)
+// =============================================================================
+
+/// Portable gather tier: `out[i] = src[keys[i]]`, out-of-range keys read 0.
+/// `gather_select` bounds-masks per lane — safe by construction. Lowers to
+/// per-lane loads (AVX-512 vgather where present) on every platform.
+pub fn gather_u32_portable(src: &[u32], keys: &[u32], out: &mut [u32]) {
+    let mut idx = 0;
+    while idx < keys.len() {
+        let valid: Mask<i32, LANES> = lane_valid(idx, keys.len());
+        let key_lanes: Simd<u32, LANES> = Simd::load_select_or_default(&keys[idx..], valid);
+        let gathered: Simd<u32, LANES> = Simd::gather_select(
+            src,
+            Mask::splat(true),
+            Simd::from_array(key_lanes.to_array().map(|k| k as usize)),
+            Simd::splat(0),
+        );
+        gathered.store_select(&mut out[idx..], valid);
+        idx += LANES;
+    }
+}
+
+/// Portable scatter: `out[keys[i]] = vals[i]`, out-of-range keys dropped.
+/// `scatter_select` suppresses OOB writes — the scalar `get_mut` semantics.
+pub fn scatter_u32_portable(keys: &[u32], vals: &[u32], out: &mut [u32]) {
+    let n = keys.len().min(out.len());
+    let mut idx = 0;
+    while idx < n {
+        let valid = lane_valid(idx, n);
+        let key_lanes: Simd<u32, LANES> = Simd::load_select_or_default(&keys[idx..], valid);
+        let val_lanes: Simd<u32, LANES> = Simd::load_select_or_default(&vals[idx..], valid);
+        val_lanes.scatter_select(
+            out,
+            Mask::from_bitmask(valid.to_bitmask()),
+            Simd::from_array(key_lanes.to_array().map(|k| k as usize)),
+        );
+        idx += LANES;
+    }
+}
+
+/// LANES-wide chunk validity mask.
+#[inline]
+fn lane_valid(idx: usize, len: usize) -> Mask<i32, LANES> {
+    Mask::from_array(std::array::from_fn(|k| idx + k < len))
 }
