@@ -114,17 +114,11 @@ pub fn diff_fast_path(old: &ArrayRef, new: &ArrayRef) -> Option<Patches> {
 
     let old_slice = old_view.as_slice::<u32>();
     let new_slice = new_view.as_slice::<u32>();
-    let n = new.len();
 
-    // SVE inequality lanes → changed indices.
-    let mut lanes = vec![0u32; n];
-    sve::neq_lanes_u32(old_slice, new_slice, &mut lanes);
-    let indices: Vec<u32> = lanes
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| **l != 0)
-        .map(|(idx, _)| idx as u32)
-        .collect();
+    // Fused compare→packed indices (portable gather-compaction; the
+    // neq→lanes→scalar-scan intermediate is gone — one pass, no lanes Vec).
+    let mut indices = Vec::with_capacity(new.len());
+    sve::neq_indices_u32(old_slice, new_slice, &mut indices);
 
     // SVE gather of the changed values straight out of `new`.
     let mut values = vec![0u32; indices.len()];

@@ -161,3 +161,29 @@ fn portable_tiers_match_scalar() {
         assert_eq!(out, a.iter().map(|&x| x.wrapping_add(7)).collect::<Vec<_>>());
     }
 }
+
+#[test]
+fn neq_indices_matches_scalar_reference() {
+    // Fused compare→compaction must equal a scalar neq scan at every length
+    // (chunk boundary, tail, empty, all-changed).
+    for n in [0usize, 1, 7, 8, 9, 33, 256, 1024] {
+        let a: Vec<u32> = (0..n as u32).map(|i| i.wrapping_mul(2654435761)).collect();
+        let b: Vec<u32> = a
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| if i % 3 == 0 { v ^ 1 } else { v })
+            .collect();
+        let mut out = Vec::new();
+        let count = vortex_buffer::portable::neq_indices_u32(&a, &b, &mut out);
+        let want: Vec<u32> = a
+            .iter()
+            .zip(&b)
+            .enumerate()
+            .filter(|(_, (x, y))| x != y)
+            .map(|(i, _)| i as u32)
+            .collect();
+        assert_eq!(count, want.len(), "count (n {n})");
+        assert_eq!(&out[..count], &want[..], "indices (n {n})");
+        assert_eq!(out.len(), count, "no trailing garbage (n {n})");
+    }
+}

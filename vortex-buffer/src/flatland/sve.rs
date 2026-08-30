@@ -85,6 +85,12 @@ pub fn neq_lanes_u32(a: &[u32], b: &[u32], out: &mut [u32]) {
     super::portable::neq_u32_portable(a, b, out)
 }
 
+/// Fused inequality→packed indices (see [`portable::neq_indices_u32`]).
+/// Portable `std::simd` tier everywhere — an SVE `svcompact(iota)` tier
+/// could beat it on aarch64; the bench arbitrates.
+pub use super::portable::neq_indices_u32;
+
+
 /// `out[i] = a[i] + c` over u32 lanes (Part 13.5 dense lift), portable tier.
 pub fn add_const_u32(a: &[u32], c: u32, out: &mut [u32]) {
     super::portable::add_const_portable(a, c, out)
