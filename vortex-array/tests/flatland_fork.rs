@@ -271,7 +271,6 @@ fn group_indices_assigns_codes_and_counts() {
 }
 
 fn make_utf8(values: &[&str]) -> vortex_array::ArrayRef {
-    use vortex_array::dtype::DType;
     let arr = vortex_array::arrays::VarBinArray::from_strs(values.to_vec());
     arr.into_array()
 }
@@ -294,8 +293,6 @@ fn raw_parts_primitive_borrows_typed_slice() {
 
 #[test]
 fn raw_parts_constant_and_dict() {
-    use vortex_array::dtype::{DType, Nullability};
-    use vortex_array::expr::stats::Precision;
     use vortex_array::raw_parts::{ConstantParts, DictParts, RawParts};
 
     let c = vortex_array::arrays::ConstantArray::new(7i64, 5usize);
@@ -532,4 +529,41 @@ fn prop_diff_fast_matches_scalar_reference() {
         assert_eq!(got_idx, indices, "indices (seed {seed})");
         assert_eq!(got_vals, values, "values (seed {seed})");
     }
+}
+
+// ── Patches::append_sorted: O(m) disjoint-append fast path ───────────────────
+
+#[test]
+fn append_sorted_matches_full_rebuild() {
+    // Disjoint append == rebuilding patches from the sorted union.
+    for (a_idx, a_val, b_idx, b_val) in [
+        (vec![], vec![], vec![3u32, 7], vec![30i64, 70]),
+        (vec![1u32], vec![20i64], vec![3u32, 9], vec![30i64, 70]),
+        (vec![0u32, 5, 9], vec![10i64, 50, 90], vec![15u32, 16], vec![150i64, 160]),
+    ] {
+        let a_idx = a_idx.to_vec();
+        let a_val = a_val.to_vec();
+        let b_idx = b_idx.to_vec();
+        let b_val = b_val.to_vec();
+        let mut a = patches(&a_idx, &a_val, 100);
+        let b = patches(&b_idx, &b_val, 100);
+        assert_eq!(a.append_sorted(&b), Some(()));
+
+        let mut union_idx = a_idx.clone();
+        union_idx.extend_from_slice(&b_idx);
+        let mut union_val = a_val.clone();
+        union_val.extend_from_slice(&b_val);
+        let expected = patches(&union_idx, &union_val, 100);
+        assert_eq!(patch_contents(&a), patch_contents(&expected));
+        assert_eq!(a.num_patches(), expected.num_patches());
+    }
+}
+
+#[test]
+fn append_sorted_rejects_overlap() {
+    let mut a = patches(&[1u32, 5], &[20i64, 60], 10);
+    let b = patches(&[5u32, 7], &[50i64, 70], 10); // 5 overlaps
+    assert_eq!(a.append_sorted(&b), None);
+    // Unchanged after rejection.
+    assert_eq!(patch_contents(&a), (vec![1u32, 5], vec![20i64, 60]));
 }

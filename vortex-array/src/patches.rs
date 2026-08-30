@@ -504,6 +504,83 @@ impl Patches {
         Some(())
     }
 
+    /// Append patches whose indices all sort strictly beyond the current
+    /// max — the spawn/append fast path (O(m) over the appended rows; no
+    /// merge walk). Flat single-chunk patches, u32 indices, matching value
+    /// ptype. Returns None (caller falls back to [`Self::merge_in_place`])
+    /// when the appended set overlaps, indices are not u32, or value ptypes
+    /// differ. Indices must already be sorted and unique — the append
+    /// contract is disjoint-by-construction, not a repair.
+    pub fn append_sorted(&mut self, indices: &Self) -> Option<()> {
+        use crate::arrays::Primitive;
+        if self.chunk_offsets.is_some() || indices.chunk_offsets.is_some() {
+            return None;
+        }
+        let other_indices = indices.indices.as_opt::<Primitive>()?;
+        let other_values = indices.values.as_opt::<Primitive>()?;
+        if other_indices.ptype() != PType::U32
+            || self.indices.as_opt::<Primitive>()?.ptype() != PType::U32
+            || self.values.as_opt::<Primitive>()?.ptype() != other_values.ptype()
+        {
+            return None;
+        }
+        let other_lanes: &[u32] = other_indices.as_slice::<u32>();
+        let other_count = other_lanes.len();
+        // Overlap means this is a merge, not an append. Empty self appends freely.
+        if other_count == 0 {
+            return Some(());
+        }
+        if let Some(&last) = self.indices.as_opt::<Primitive>()?.as_slice::<u32>().last() {
+            if other_lanes[0] <= last {
+                return None;
+            }
+        } else {
+            // Empty self: an append is just the other set.
+            self.indices = indices.indices.clone();
+            self.values = indices.values.clone();
+            self.array_len = self.array_len.max(indices.array_len);
+            return Some(());
+        }
+        let idx_guard = self.indices.try_buffer_mut::<u32>()?;
+        let total = match_each_native_ptype!(other_values.ptype(), |T| {
+            let other_val_slice: &[T] = other_values.as_slice::<T>();
+            let mut val_guard = self.values.try_buffer_mut::<T>()?;
+            let mut idx_guard = idx_guard;
+            idx_guard.reserve(other_count);
+            val_guard.reserve(other_count);
+            // SAFETY: append region is strictly beyond every existing
+            // element; copy_nonoverlapping, then extend the length.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    other_lanes.as_ptr(),
+                    idx_guard.as_mut_ptr().add(idx_guard.len()),
+                    other_count,
+                );
+                std::ptr::copy_nonoverlapping(
+                    other_val_slice.as_ptr(),
+                    val_guard.as_mut_ptr().add(val_guard.len()),
+                    other_count,
+                );
+            }
+            let total = idx_guard.len() + other_count;
+            // SAFETY: both buffers were reserved before the appends above;
+            // lengths now cover exactly the initialized prefix.
+            unsafe {
+                idx_guard.set_len(total);
+                val_guard.set_len(total);
+            }
+            total
+        });
+        // Guards dropped (buffers frozen back into place) — sync outer lengths.
+        // SAFETY: encoding data was appended to exactly `total` rows.
+        unsafe {
+            self.indices.set_len(total);
+            self.values.set_len(total);
+        }
+        self.array_len = self.array_len.max(indices.array_len);
+        Some(())
+    }
+
     /// Construct new patches without validation, for the simple case of
     /// single-chunk patches (no chunk_offsets, no offset_within_chunk).
     ///

@@ -452,8 +452,7 @@ mod tests {
 
     #[test]
     fn dict_null_codes_sort_first() -> VortexResult<()> {
-        use crate::arrays::PrimitiveArray;
-        let values = buffer![30i32, 10, 20].into_array();
+            let values = buffer![30i32, 10, 20].into_array();
         let codes = PrimitiveArray::from_option_iter([Some(0u32), None, Some(1u32), Some(2u32), None])
             .into_array();
         let dict = DictArray::try_new(codes, values)?.into_array();
@@ -570,7 +569,6 @@ mod sortedness_tests {
     use crate::IntoArray;
     use crate::VortexSessionExecute;
     use crate::array_session;
-    use crate::arrays::PrimitiveArray;
 
     #[test]
     fn sortedness_tri_state() -> VortexResult<()> {
