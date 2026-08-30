@@ -142,11 +142,22 @@ pub fn affine(
         }
         let validity = p.validity()?;
 
-        // u32 add-only rides the portable SIMD add-const tier.
-        if ptype == PType::U32 && factor == 1 {
+        // u32 rides the portable SIMD tiers: factor==1 → add-const;
+        // general affine → fused mul_add (no per-element f64 hop, wrapping
+        // in the lane type — exact for u32 columns).
+        if ptype == PType::U32 {
             let src = p.as_slice::<u32>();
             let mut out = vec![0u32; src.len()];
-            vortex_buffer::portable::add_const_u32(src, base as u32, &mut out);
+            if factor == 1 {
+                vortex_buffer::portable::add_const_u32(src, base as u32, &mut out);
+            } else {
+                vortex_buffer::portable::mul_add_const_u32(
+                    src,
+                    factor as u32,
+                    base as u32,
+                    &mut out,
+                );
+            }
             return Ok(PrimitiveArray::new(out, validity).into_array());
         }
 
