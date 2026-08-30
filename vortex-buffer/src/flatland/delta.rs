@@ -76,7 +76,7 @@ impl<T: Copy> DeltaBuffer<T> {
         let bytes = self.presence.as_slice();
         let mut count: usize = bytes.iter().map(|b| b.count_ones() as usize).sum();
         // Zero any padding bits past `rows` in the final byte.
-        if self.rows % 8 != 0 && !bytes.is_empty() {
+        if !self.rows.is_multiple_of(8) && !bytes.is_empty() {
             count -= (bytes[bytes.len() - 1] >> (self.rows % 8)).count_ones() as usize;
         }
         count
