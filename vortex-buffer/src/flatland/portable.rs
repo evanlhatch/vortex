@@ -56,9 +56,14 @@ pub(crate) fn neq_u32_portable(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
             .copy_to_slice(&mut out[idx..idx + LANES]);
         idx += LANES;
     }
+    // Masked tail: one lane op covers the remainder (no scalar loop).
     while idx < lhs.len() {
-        out[idx] = if lhs[idx] != rhs[idx] { 1 } else { 0 };
-        idx += 1;
+        let valid = lane_valid(idx, lhs.len());
+        let lhs_lanes = Simd::<u32, LANES>::load_select_or_default(&lhs[idx..], valid);
+        let rhs_lanes = Simd::<u32, LANES>::load_select_or_default(&rhs[idx..], valid);
+        (lhs_lanes.simd_ne(rhs_lanes).select(Simd::splat(1), Simd::splat(0)))
+            .store_select(&mut out[idx..], valid);
+        idx += LANES;
     }
 }
 
@@ -113,12 +118,13 @@ fn binary_loop(
         f(lhs_lanes, rhs_lanes).copy_to_slice(&mut out[idx..idx + LANES]);
         idx += LANES;
     }
+    // Masked tail: one lane op for the remainder (no scalar loop).
     while idx < len {
-        out[idx] = f(
-            Simd::<u32, LANES>::splat(lhs[idx]),
-            Simd::<u32, LANES>::splat(rhs[idx]),
-        )[0];
-        idx += 1;
+        let valid = lane_valid(idx, len);
+        let lhs_lanes = Simd::<u32, LANES>::load_select_or_default(&lhs[idx..], valid);
+        let rhs_lanes = Simd::<u32, LANES>::load_select_or_default(&rhs[idx..], valid);
+        f(lhs_lanes, rhs_lanes).store_select(&mut out[idx..], valid);
+        idx += LANES;
     }
 }
 
@@ -136,9 +142,12 @@ pub(crate) fn not_u32_portable(values: &[u32], out: &mut [u32]) {
         (!lane).copy_to_slice(&mut out[idx..idx + LANES]);
         idx += LANES;
     }
-    while idx < values.len() {
-        out[idx] = !values[idx];
-        idx += 1;
+    // Masked tail: one lane op for the remainder (no scalar loop).
+    while idx < len {
+        let valid = lane_valid(idx, len);
+        let lanes = Simd::<u32, LANES>::load_select_or_default(&values[idx..], valid);
+        (!lanes).store_select(&mut out[idx..], valid);
+        idx += LANES;
     }
 }
 
@@ -225,9 +234,12 @@ pub(crate) fn add_const_portable(values: &[u32], constant: u32, out: &mut [u32])
         (lanes + constant_lanes).copy_to_slice(&mut out[idx..idx + LANES]);
         idx += LANES;
     }
+    // Masked tail: one lane op for the remainder (no scalar loop).
     while idx < values.len() {
-        out[idx] = values[idx].wrapping_add(constant);
-        idx += 1;
+        let valid = lane_valid(idx, values.len());
+        let lanes = Simd::<u32, LANES>::load_select_or_default(&values[idx..], valid);
+        (lanes + constant_lanes).store_select(&mut out[idx..], valid);
+        idx += LANES;
     }
 }
 
@@ -368,8 +380,11 @@ pub fn mul_add_const_u32(values: &[u32], constant: u32, addend: u32, out: &mut [
         (lanes * cv + av).copy_to_slice(&mut out[idx..idx + LANES]);
         idx += LANES;
     }
+    // Masked tail: one lane op for the remainder (no scalar loop).
     while idx < values.len() {
-        out[idx] = values[idx].wrapping_mul(constant).wrapping_add(addend);
-        idx += 1;
+        let valid = lane_valid(idx, values.len());
+        let lanes = Simd::<u32, LANES>::load_select_or_default(&values[idx..], valid);
+        (lanes * cv + av).store_select(&mut out[idx..], valid);
+        idx += LANES;
     }
 }
