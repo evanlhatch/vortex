@@ -159,6 +159,16 @@ fn portable_tiers_match_scalar() {
         assert_eq!(out, a.iter().map(|&x| !x).collect::<Vec<_>>());
         vortex_buffer::portable::add_const_u32(&a, 7, &mut out);
         assert_eq!(out, a.iter().map(|&x| x.wrapping_add(7)).collect::<Vec<_>>());
+        vortex_buffer::portable::add_u32(&a, &b, &mut out);
+        assert_eq!(out, a.iter().zip(&b).map(|(x, y)| x.wrapping_add(*y)).collect::<Vec<_>>());
+        vortex_buffer::portable::sub_u32(&a, &b, &mut out);
+        assert_eq!(out, a.iter().zip(&b).map(|(x, y)| x.wrapping_sub(*y)).collect::<Vec<_>>());
+        vortex_buffer::portable::min_u32(&a, &b, &mut out);
+        assert_eq!(out, a.iter().zip(&b).map(|(x, y)| *x.min(y)).collect::<Vec<_>>());
+        vortex_buffer::portable::max_u32(&a, &b, &mut out);
+        assert_eq!(out, a.iter().zip(&b).map(|(x, y)| *x.max(y)).collect::<Vec<_>>());
+        vortex_buffer::portable::clamp_const_u32(&a, 10, 90, &mut out);
+        assert_eq!(out, a.iter().map(|&x| x.clamp(10, 90)).collect::<Vec<_>>());
     }
 }
 

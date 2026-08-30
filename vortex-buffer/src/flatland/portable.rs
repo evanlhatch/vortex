@@ -142,6 +142,74 @@ pub(crate) fn not_u32_portable(values: &[u32], out: &mut [u32]) {
     }
 }
 
+/// `out[i] = a[i] + b[i]` (wrapping).
+pub fn add_u32(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    static KERNEL: CpuKernel<U32BinaryKernel> =
+        CpuKernel::new(|| add_u32_portable);
+    KERNEL.get()(lhs, rhs, out)
+}
+
+pub(crate) fn add_u32_portable(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    binary_loop(lhs, rhs, out, |x, y| x + y) // Simd int ops wrap, matching engine modular arithmetic
+}
+
+/// `out[i] = a[i] - b[i]` (wrapping).
+pub fn sub_u32(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    static KERNEL: CpuKernel<U32BinaryKernel> =
+        CpuKernel::new(|| sub_u32_portable);
+    KERNEL.get()(lhs, rhs, out)
+}
+
+pub(crate) fn sub_u32_portable(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    binary_loop(lhs, rhs, out, |x, y| x - y)
+}
+
+/// `out[i] = min(a[i], b[i])`.
+pub fn min_u32(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    static KERNEL: CpuKernel<U32BinaryKernel> =
+        CpuKernel::new(|| min_u32_portable);
+    KERNEL.get()(lhs, rhs, out)
+}
+
+pub(crate) fn min_u32_portable(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    use std::simd::cmp::SimdPartialOrd;
+    binary_loop(lhs, rhs, out, |x, y| y.simd_lt(x).select(y, x))
+    // Simd::min/max are Ord-lexicographic on integers — lane-wise min needs select.
+}
+
+/// `out[i] = a[i].max(b[i])`.
+pub fn max_u32(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    static KERNEL: CpuKernel<U32BinaryKernel> =
+        CpuKernel::new(|| max_u32_portable);
+    KERNEL.get()(lhs, rhs, out)
+}
+
+pub(crate) fn max_u32_portable(lhs: &[u32], rhs: &[u32], out: &mut [u32]) {
+    use std::simd::cmp::SimdPartialOrd;
+    binary_loop(lhs, rhs, out, |x, y| x.simd_gt(y).select(x, y))
+}
+
+/// `out[i] = a[i].clamp(lo, hi)` (lo <= hi contract; portable is the default tier).
+pub fn clamp_const_u32(values: &[u32], lo: u32, hi: u32, out: &mut [u32]) {
+    use std::simd::cmp::SimdPartialOrd;
+    let lv = Simd::<u32, LANES>::splat(lo);
+    let hv = Simd::<u32, LANES>::splat(hi);
+    let len = values.len();
+    let mut idx = 0;
+    while idx + LANES <= len {
+        let lanes = Simd::<u32, LANES>::from_slice(&values[idx..idx + LANES]);
+        // Lane-wise max(lo) then min(hi) via mask select — Simd::min/max are
+        // Ord-lexicographic on integers, NOT lane-wise.
+        let raised = lanes.simd_lt(lv).select(lv, lanes);
+        raised.simd_gt(hv).select(hv, raised).copy_to_slice(&mut out[idx..idx + LANES]);
+        idx += LANES;
+    }
+    while idx < len {
+        out[idx] = values[idx].clamp(lo, hi);
+        idx += 1;
+    }
+}
+
 /// `out[i] = a[i] + constant` (wrapping).
 pub fn add_const_u32(values: &[u32], constant: u32, out: &mut [u32]) {
     static KERNEL: CpuKernel<U32AddConstKernel> =
